@@ -1,0 +1,10 @@
+# .ainative/project.yaml — copied from AiNative project.yaml.template during
+# onboarding (2026-10-14). Never edit the template in place. Source:
+# AiNative docs/knowledge/setup/new-project.md.
+#
+# The TODO placeholder below is intentional at onboarding time. The loop
+# blocks cards until project-bootstrapper replaces it with real commands
+# that prove the scaffold runs.
+
+validation_commands:
+  - echo "TODO(bootstrap): replace with real validation commands, e.g. uv run pytest"
