@@ -1,0 +1,8 @@
+# dependencies + build output
+node_modules/
+dist/
+.astro/
+
+# local-only: scratch notes and kanban worktrees are never committed
+scratch/
+.worktrees/

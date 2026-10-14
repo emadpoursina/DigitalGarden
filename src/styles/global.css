@@ -1,0 +1,30 @@
+/* Design tokens — tiny set per PRD §10 (clean/minimal, content over chrome).
+   Light + dark via prefers-color-scheme; full WCAG AA pass lands with F8. */
+:root {
+  --font-body: Georgia, 'Times New Roman', serif;
+  --font-ui: system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  --space: 1rem;
+  --ink: #1a1a1a;
+  --paper: #fffdf8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e4da;
+    --paper: #16140f;
+  }
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.6;
+}
+
+main {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: calc(var(--space) * 2) var(--space);
+}

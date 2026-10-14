@@ -7,9 +7,10 @@
   automatic backlinks, full-text search, and a note-maturity model
   (seed → growing → evergreen). Private by default; selective static
   publishing is v1.1. Spec: `PRD.md` at repo root (v1.0, 2026-10-14).
-- **Stack:** Not decided yet — no app code exists. The project-bootstrapper
-  picks the stack from `PRD.md` and replaces the `TODO(bootstrap)` marker
-  in `.ainative/project.yaml` with real validation commands.
+- **Stack:** Node.js + Astro 7 (SSG + local dev UI), CodeMirror 6 editor,
+  Minisearch client-side index, simple-git history, markdown-it parsing —
+  per `PRD.md` §9. Validation is `npm install` + `npm run build`
+  (`.ainative/project.yaml`); the tester state runs them.
 - **Layout:** Repo root holds `PRD.md`, `IDEA.md`, `README.md`,
   `.ainative/project.yaml`, plus the Spec Kit layout (`.specify/`,
   `.opencode/commands/speckit.*.md`) for the spec/plan/tasks workflow.
