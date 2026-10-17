@@ -6,3 +6,6 @@ dist/
 # local-only: scratch notes and kanban worktrees are never committed
 scratch/
 .worktrees/
+
+# agent handoffs are never committed
+.agent/

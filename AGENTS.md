@@ -24,5 +24,8 @@
   state runs them for managed work.
 - For a `feature`, follow the spec/plan/tasks workflow and its reviews. A
   `change` is already specified; a `job` runs only its named skill.
+- Card routing: parent/unpathed cards are assigned to `pivs-orchestrator`
+  (route front door); explicit `change`/`job` cards go direct to worker
+  profiles; loop cards are never left `ready` on `default` (use triage when undecided).
 - Ask rather than guessing when a consequential project decision is unclear.
 - Update related project documentation when behavior or interfaces change.
