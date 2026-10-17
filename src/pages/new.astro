@@ -1,0 +1,334 @@
+---
+// Quick-capture page (F2, D1/D4): a minimal form on the shared Base shell.
+// Markup + page-scoped styles only — the submit/key/conflict wiring arrives
+// with T016/T019/T022 (tasks.md shared-file chain: T004 → T016 → T019 → T022).
+// Behavior predicates live in src/lib/capture-client.ts (sibling card C).
+import Base from '../layouts/Base.astro';
+---
+
+<Base>
+  <header class="capture-header">
+    <h1>Quick capture</h1>
+    <p class="capture-hint">Title, a sentence, optional tags — save in one second.</p>
+  </header>
+
+  <form id="capture-form">
+    <label class="field-label" for="capture-title">Title</label>
+    <input
+      id="capture-title"
+      name="title"
+      type="text"
+      autofocus
+      autocomplete="off"
+      spellcheck="false"
+      aria-label="Title"
+      placeholder="What's on your mind?"
+    />
+
+    <label class="field-label" for="capture-body">Body</label>
+    <textarea
+      id="capture-body"
+      name="body"
+      rows="10"
+      aria-label="Body (raw Markdown)"
+      placeholder="Raw Markdown…"></textarea>
+
+    <label class="field-label" for="capture-tags">Tags</label>
+    <input
+      id="capture-tags"
+      name="tags"
+      type="text"
+      autocomplete="off"
+      aria-label="Tags (comma-separated)"
+      placeholder="memory, spaced"
+    />
+
+    <div class="capture-actions">
+      <button type="submit" id="capture-save">Save</button>
+    </div>
+
+    <!-- Inline validation / save-error messages (role="alert" for AT users). -->
+    <p id="capture-status" role="alert"></p>
+
+    <!-- Slug-conflict state: hidden until a 409 arrives (T022). -->
+    <div id="capture-conflict" role="alert" hidden>
+      <p id="capture-conflict-message"></p>
+      <div class="capture-actions">
+        <button type="button" id="save-as-new">Save as new</button>
+        <button type="button" id="open-existing">Open existing</button>
+      </div>
+    </div>
+  </form>
+</Base>
+
+<style>
+  .capture-header {
+    margin-bottom: calc(var(--space) * 1.5);
+  }
+
+  .capture-header h1 {
+    font-family: var(--font-ui);
+    font-size: 1.4rem;
+    margin: 0 0 0.25rem;
+  }
+
+  .capture-hint {
+    margin: 0;
+    font-family: var(--font-ui);
+    font-size: 0.85rem;
+    opacity: 0.7;
+  }
+
+  #capture-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .field-label {
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    opacity: 0.75;
+  }
+
+  #capture-title,
+  #capture-body,
+  #capture-tags {
+    font-family: var(--font-body);
+    font-size: 1rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    padding: 0.5rem 0.6rem;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  #capture-title:focus,
+  #capture-body:focus,
+  #capture-tags:focus {
+    outline: 2px solid currentColor;
+    outline-offset: 1px;
+  }
+
+  #capture-body {
+    resize: vertical;
+    line-height: 1.5;
+  }
+
+  .capture-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.25rem;
+  }
+
+  button {
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+    color: var(--paper);
+    background: var(--ink);
+    border: 1px solid var(--ink);
+    border-radius: 4px;
+    padding: 0.45rem 1rem;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  #open-existing {
+    color: var(--ink);
+    background: var(--paper);
+  }
+
+  #capture-status:empty {
+    display: none;
+  }
+
+  #capture-status {
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+    margin: 0.25rem 0 0;
+  }
+
+  #capture-conflict {
+    border: 1px solid currentColor;
+    border-left-width: 4px;
+    border-radius: 4px;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+    font-family: var(--font-ui);
+  }
+
+  #capture-conflict[hidden] {
+    display: none;
+  }
+
+  #capture-conflict-message {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+  }
+</style>
+
+<script>
+  // Client wiring for `/new` — T004 (focus), T016 (submit), T019 (keys),
+  // T022 (conflict). Every decision comes from `src/lib/capture-client.ts`
+  // (sibling card C): this file only binds DOM events to those predicates.
+  import {
+    shouldAcceptSubmit,
+    submitCapture,
+    captureKeyCommand,
+    handleEscape,
+    conflictMessage,
+    saveCaptureAsNew,
+    openExisting,
+    type CaptureOutcome,
+    type CapturePayload,
+    type CaptureRequestInit,
+    type CaptureResponsePorts,
+  } from '../lib/capture-client';
+
+  /* ---- elements ---- */
+  const form = document.getElementById('capture-form') as HTMLFormElement;
+  const titleEl = document.getElementById('capture-title') as HTMLInputElement;
+  const bodyEl = document.getElementById('capture-body') as HTMLTextAreaElement;
+  const tagsEl = document.getElementById('capture-tags') as HTMLInputElement;
+  const statusEl = document.getElementById('capture-status') as HTMLParagraphElement;
+  const conflictEl = document.getElementById('capture-conflict') as HTMLDivElement;
+  const conflictMsgEl = document.getElementById(
+    'capture-conflict-message',
+  ) as HTMLParagraphElement;
+  const saveBtn = document.getElementById('capture-save') as HTMLButtonElement;
+  const saveAsNewBtn = document.getElementById('save-as-new') as HTMLButtonElement;
+  const openExistingBtn = document.getElementById('open-existing') as HTMLButtonElement;
+
+  /* ---- T004: belt-and-braces focus ----
+     The `autofocus` attribute can be ignored on restored tabs, so the caret is
+     placed explicitly on load (SC-001). Runs before any other behavior. */
+  titleEl?.focus();
+
+  /* ---- shared state ---- */
+  /** Exactly one in-flight capture request (FR-011 / SC-008). */
+  let inFlight = false;
+  /** Slug revealed by the last 409 — what "Open existing" navigates to. */
+  let conflictSlug = '';
+
+  /** All three submit controls move together while a request is in flight. */
+  function setBusy(busy: boolean): void {
+    inFlight = busy;
+    saveBtn.disabled = busy;
+    saveAsNewBtn.disabled = busy;
+    openExistingBtn.disabled = busy;
+  }
+
+  function fields(): CapturePayload {
+    return { title: titleEl.value, body: bodyEl.value, tagsText: tagsEl.value };
+  }
+
+  /** Side-effect ports handed to the capture-client module (plan: pages only wire DOM). */
+  const ports: CaptureResponsePorts & {
+    fetch(url: string, init: CaptureRequestInit): Promise<Response>;
+  } = {
+    fetch: (url, init) => window.fetch(url, init),
+    storage: window.sessionStorage,
+    assign: (url) => location.assign(url),
+    setStatus: (message) => {
+      statusEl.textContent = message;
+    },
+    showConflict: (slug) => {
+      conflictSlug = slug;
+      conflictMsgEl.textContent = conflictMessage(slug);
+      conflictEl.hidden = false;
+    },
+    focusSaveAsNew: () => {
+      // A 409 means the request is over: release the disabled controls FIRST —
+      // focus() on a `disabled` button is a silent no-op — then move focus to
+      // the content-preserving choice (plan §3).
+      setBusy(false);
+      saveAsNewBtn.focus();
+    },
+  };
+
+  /**
+   * Run one capture request: `shouldAcceptSubmit` admits exactly one, the three
+   * controls are disabled while it is in flight, and the outcome comes back
+   * through `handleCaptureResponse` (navigation + inline messages).
+   */
+  async function runCapture(operation: () => Promise<CaptureOutcome>): Promise<void> {
+    if (!shouldAcceptSubmit(inFlight)) return; // double-Enter / double-click → one note
+    setBusy(true);
+    statusEl.textContent = '';
+    try {
+      await operation();
+    } catch {
+      // Network/transport failure: loud inline error, never a silent "saved".
+      statusEl.textContent = 'The capture could not be saved.';
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /* ---- T016: submission ---- */
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void runCapture(() => submitCapture(fields(), ports));
+  });
+
+  /* ---- T019: key commands ----
+     Exactly three bindings exist (captureKeyCommand); NO document-level
+     printable-key handler is installed, so every printable key types (FR-006). */
+  document.addEventListener('keydown', (event) => {
+    const active = document.activeElement;
+    const command = captureKeyCommand({
+      key: event.key,
+      ctrl: event.ctrlKey,
+      meta: event.metaKey,
+      alt: event.altKey,
+      shift: event.shiftKey,
+      activeId: active ? active.id : null,
+    });
+    if (command === null) return;
+
+    if (command === 'advance-title') {
+      // Enter in the title advances to the body instead of submitting.
+      event.preventDefault();
+      bodyEl.focus();
+      return;
+    }
+
+    if (command === 'submit') {
+      // Ctrl/⌘+Enter submits anywhere inside the form.
+      if (!form.contains(event.target as Node)) return;
+      event.preventDefault();
+      void runCapture(() => submitCapture(fields(), ports));
+      return;
+    }
+
+    // 'escape' → dashboard, confirming first when a draft would be lost.
+    event.preventDefault();
+    handleEscape(
+      { title: titleEl.value, body: bodyEl.value, tags: tagsEl.value },
+      {
+        confirm: (message) => window.confirm(message),
+        assign: (url) => location.assign(url),
+        refocusTitle: () => titleEl.focus(),
+      },
+    );
+  });
+
+  /* ---- T022: conflict choices ---- */
+  saveAsNewBtn.addEventListener('click', () => {
+    // Same payload, `mode: 'unique'` → F1 picks the first free `<title>-2` slug.
+    void runCapture(() => saveCaptureAsNew(fields(), ports));
+  });
+
+  openExistingBtn.addEventListener('click', () => {
+    // Explicit user choice: the draft is discarded, no second prompt (clarify Q2).
+    openExisting(conflictSlug, ports);
+  });
+</script>

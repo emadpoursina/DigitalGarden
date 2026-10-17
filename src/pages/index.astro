@@ -1,17 +1,264 @@
 ---
-// Dashboard placeholder — scaffold only (PRD Journey 1–4 arrive in F2/F4/F6/F8).
-// Recent notes, seeds-needing-attention, and quick stats are rendered here.
+// Dashboard (F2) — the entry surface of the capture loop.
+// T005: header row whose first focusable element is the Capture link
+//       (FR-001, plan §4 placement decision — a header row, not the old
+//       <nav> list).
+// T007: the page's ONE key binding — `c` → /new (FR-001/FR-002).
+// T013: recent notes, most-recently-updated first, rows are NON-links in F2
+//       (`/note/<slug>` ships with F8, plan §4).
+// T017: degraded-history banner driven by `gitWarningDecision`.
 import Base from '../layouts/Base.astro';
+import { RECENT_NOTES_LIMIT, selectRecentNotes } from '../lib/dashboard';
+import { listNoteSlugs, readNote, type Note } from '../lib/notes';
+import { resolveVaultDir } from '../lib/vault';
+
+// Server-side render on every request (output:'server'), so a capture saved
+// through POST /api/capture is in this list on the next page load — no
+// client-side list code, no manual refresh (FR-005, US2.2).
+const vaultDir = resolveVaultDir();
+const notes: Note[] = [];
+for (const slug of listNoteSlugs(vaultDir)) {
+  try {
+    notes.push(readNote(vaultDir, slug));
+  } catch {
+    // One malformed file must not take the whole dashboard down; it stays
+    // on disk untouched (F1 read path, D7 read-only) and is simply not a row.
+  }
+}
+
+const rows = selectRecentNotes(notes, RECENT_NOTES_LIMIT).map((note) => ({
+  slug: note.slug,
+  title: note.title,
+  status: note.status,
+  updated: note.updated,
+}));
 ---
 
 <Base>
-  <h1>Digital Garden</h1>
-  <p>Scaffold placeholder. Capture, search, tags, and note views land in F1–F8.</p>
-  <nav>
-    <ul>
-      <li><a href="/new">Capture (F2)</a></li>
-      <li><a href="/search">Search (F5)</a></li>
-      <li><a href="/tags">Tags (F6)</a></li>
-    </ul>
-  </nav>
+  <header class="dash-header">
+    <h1>Digital Garden</h1>
+    <a href="/new" id="capture-entry">Capture</a>
+  </header>
+
+  <div id="git-warning" class="banner" role="alert" hidden>
+    Saved, but git history is unavailable: this capture was written to disk
+    without a commit.
+  </div>
+
+  <section aria-labelledby="recent-notes-heading">
+    <h2 id="recent-notes-heading">Recent notes</h2>
+
+    {
+      rows.length > 0 ? (
+        <table class="recent-notes">
+          <thead>
+            <tr>
+              <th scope="col">Title</th>
+              <th scope="col">Slug</th>
+              <th scope="col">Status</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              // Non-links on purpose: /note/<slug> 404s until F8 (plan §4).
+              <tr>
+                <td class="row-title">{row.title}</td>
+                <td class="row-slug">{row.slug}</td>
+                <td>
+                  <span class="badge" data-status={row.status}>
+                    {row.status}
+                  </span>
+                </td>
+                <td>
+                  <time datetime={row.updated}>{row.updated}</time>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p class="empty">No notes yet — use Capture to plant the first one.</p>
+      )
+    }
+  </section>
 </Base>
+
+<script>
+  // Both dashboard behaviors import the same sibling-C module; this page
+  // registers exactly ONE key binding and runs one warn-once check at load.
+  import {
+    GIT_WARNED_KEY,
+    GIT_WARNED_VALUE,
+    gitWarningDecision,
+    shouldOpenCapture,
+  } from '../lib/capture-client';
+
+  // T007 — the dashboard's ONE key binding (FR-001/FR-002, D4, plan §4).
+  // Nothing else on this page listens for keys: `c` with focus outside a
+  // field opens the capture page, `c` typed into a field types the letter.
+  document.addEventListener('keydown', (event) => {
+    const el = document.activeElement as HTMLElement | null;
+
+    if (
+      shouldOpenCapture({
+        key: event.key,
+        ctrl: event.ctrlKey,
+        meta: event.metaKey,
+        alt: event.altKey,
+        shift: event.shiftKey,
+        activeTag: el ? el.tagName.toLowerCase() : null,
+        // A [contenteditable] region is not detectable from its tag name
+        // (impl-C wiring note), so the flag is passed explicitly.
+        activeContentEditable: el ? el.isContentEditable : false,
+      })
+    ) {
+      location.assign('/new');
+    }
+  });
+
+  // T017 — degraded-history banner (FR-010, plan R5, impl-C warn-once
+  // resolution: `?degraded=1` is the delivery signal, the session flag stops
+  // a second delivery in the same tab, a reload clears the flag first so a
+  // *new* failure can warn again).
+  // Runs after the listener above is registered, so a storage/quota surprise
+  // here can never take the `c` shortcut down with it.
+  const navEntries = performance.getEntriesByType(
+    'navigation',
+  ) as PerformanceNavigationTiming[];
+  const navType = navEntries.length > 0 ? navEntries[0].type : 'navigate';
+  const hasParam =
+    new URLSearchParams(window.location.search).get('degraded') === '1';
+  const warned = sessionStorage.getItem(GIT_WARNED_KEY) === GIT_WARNED_VALUE;
+  const decision = gitWarningDecision({ navType, hasParam, warned });
+
+  if (decision.warned) sessionStorage.setItem(GIT_WARNED_KEY, GIT_WARNED_VALUE);
+  else sessionStorage.removeItem(GIT_WARNED_KEY);
+
+  const banner = document.getElementById('git-warning');
+  if (banner && decision.banner) banner.hidden = false;
+
+  // Consume the one-shot signal: the URL goes back to a plain `/` so a
+  // reload of this page cannot re-deliver it (warn-once stays exact).
+  if (hasParam) history.replaceState(null, '', window.location.pathname);
+</script>
+
+<style>
+  .dash-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space);
+    margin-bottom: calc(var(--space) * 1.5);
+  }
+
+  .dash-header h1 {
+    font-family: var(--font-ui);
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  #capture-entry {
+    font-family: var(--font-ui);
+    font-size: 1rem;
+    padding: 0.35rem 0.9rem;
+    border: 1px solid var(--ink);
+    border-radius: 4px;
+    text-decoration: none;
+  }
+
+  #capture-entry:hover {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  #capture-entry:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  .banner {
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: calc(var(--space) * 1.25);
+    border: 1px solid #8a6d1f;
+    border-left-width: 4px;
+    border-radius: 4px;
+    color: #8a6d1f;
+    background: color-mix(in srgb, #8a6d1f 8%, transparent);
+  }
+
+  section h2 {
+    font-family: var(--font-ui);
+    font-size: 1.1rem;
+    margin: 0 0 calc(var(--space) * 0.5);
+  }
+
+  .recent-notes {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+  }
+
+  .recent-notes th,
+  .recent-notes td {
+    text-align: left;
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+    vertical-align: top;
+  }
+
+  .recent-notes th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+
+  .row-title {
+    font-weight: 600;
+  }
+
+  .row-slug,
+  .recent-notes time {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    opacity: 0.8;
+    white-space: nowrap;
+  }
+
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+  }
+
+  .badge[data-status='seed'] {
+    color: #8a6d1f;
+  }
+
+  .badge[data-status='growing'] {
+    color: #2f6b3a;
+  }
+
+  .badge[data-status='evergreen'] {
+    color: #1f5d8a;
+  }
+
+  .badge[data-status='archived'] {
+    opacity: 0.65;
+  }
+
+  .empty {
+    font-family: var(--font-ui);
+    opacity: 0.75;
+  }
+</style>
