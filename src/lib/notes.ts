@@ -878,21 +878,49 @@ export function extractWikiLinks(body: string): WikiLink[] {
 }
 
 /**
- * Resolve a wikilink target to a note slug, case-insensitively, matching
- * either slug or title (PRD F3.4 canonical rule for F1's share of it).
- * Returns null for pending (not-yet-created) notes — F3 renders those as
+ * Resolve a wikilink target to a note slug, case-insensitively, via F3's
+ * canonical three-tier rule (spec FR-003, clarification Q1):
+ *
+ *   1. exact slug match (case-folded)
+ *   2. exact title match (case-folded)
+ *   3. `slugify(target)` equals the note's slug — closes D3's slugify gap,
+ *      so `[[Retrieval Practice]]` reaches slug `retrieval-practice`.
+ *
+ * The first tier with any match wins; ties inside a tier break to the
+ * lexicographically smallest slug (titles are not unique, slugs are).
+ * Returns null only when all three tiers miss — F3 renders those as
  * "pending" links that create the note on first click.
+ *
+ * This one function drives rendering, the backlink index, and link
+ * insertion alike, so the three can never disagree (FR-003).
  */
 export function resolveWikiLink(target: string, notes: NoteFields[]): string | null {
   const folded = target.trim().toLowerCase();
   if (!folded) return null;
-  for (const n of notes) {
-    if (n.slug.toLowerCase() === folded) return n.slug;
-  }
-  for (const n of notes) {
-    if (n.title.trim().toLowerCase() === folded) return n.slug;
-  }
-  return null;
+
+  /** Smallest slug in a tier, or null when the tier matched nothing. */
+  const smallest = (slugs: string[]): string | null => {
+    if (slugs.length === 0) return null;
+    let best = slugs[0]!;
+    for (const slug of slugs) if (slug < best) best = slug;
+    return best;
+  };
+
+  // Tier 1 — exact slug.
+  const bySlug = smallest(
+    notes.filter((n) => n.slug.toLowerCase() === folded).map((n) => n.slug),
+  );
+  if (bySlug !== null) return bySlug;
+
+  // Tier 2 — exact title.
+  const byTitle = smallest(
+    notes.filter((n) => n.title.trim().toLowerCase() === folded).map((n) => n.slug),
+  );
+  if (byTitle !== null) return byTitle;
+
+  // Tier 3 — slugify equivalence (accents/punctuation/case collapse).
+  const derived = slugify(target).toLowerCase();
+  return smallest(notes.filter((n) => n.slug.toLowerCase() === derived).map((n) => n.slug));
 }
 
 /** Slug → inbound `[[links]]` with link text, over live notes only. */

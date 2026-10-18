@@ -362,3 +362,88 @@ describe('index hooks for F3/F5/F6', () => {
     expect(buildTagIndex(index.notes)).toEqual(index.tags);
   });
 });
+
+describe('resolveWikiLink three-tier rule (F3 FR-003 / AC4)', () => {
+  it('tier 3: slugify-equivalence reaches notes whose title differs in case/accents', () => {
+    const vault = freshVault();
+    const rp = createNote(vault, {
+      title: 'Retrieval practice sessions',
+      slug: 'retrieval-practice',
+      now: FIXED_NOW,
+    }).note;
+    const cafe = createNote(vault, { title: 'Café Society', now: FIXED_NOW }).note;
+    expect(cafe.slug).toBe('cafe-society');
+
+    // D3's proven gap: both of these returned null before this change.
+    expect(resolveWikiLink('Retrieval Practice', [rp])).toBe('retrieval-practice');
+    expect(resolveWikiLink('cafe society', [cafe])).toBe('cafe-society');
+
+    // Accent and punctuation variants collapse to the same slug.
+    expect(resolveWikiLink('CAFÉ SOCIETY', [cafe])).toBe('cafe-society'); // tier 2 (exact title)
+    expect(resolveWikiLink('café society!', [cafe])).toBe('cafe-society'); // tier 3
+    expect(resolveWikiLink('  retrieval   practice  ', [rp])).toBe('retrieval-practice');
+  });
+
+  it('keeps the F1 regressions green (ARTIFICIAL-INTELLIGENCE, all-miss → null)', () => {
+    const vault = freshVault();
+    const a = createNote(vault, { title: 'Artificial Intelligence', now: FIXED_NOW }).note;
+    expect(resolveWikiLink('artificial intelligence', [a])).toBe(a.slug);
+    expect(resolveWikiLink('ARTIFICIAL-INTELLIGENCE', [a])).toBe(a.slug);
+    expect(resolveWikiLink('No Such Note', [a])).toBeNull();
+    expect(resolveWikiLink('cafe society', [a])).toBeNull(); // tier 3 misses too
+    expect(resolveWikiLink('', [a])).toBeNull();
+    expect(resolveWikiLink('   ', [a])).toBeNull();
+  });
+
+  it('breaks ties inside a tier to the lexicographically smallest slug', () => {
+    const vault = freshVault();
+    const beta = createNote(vault, { title: 'Shared', slug: 'beta-note', now: FIXED_NOW }).note;
+    const alpha = createNote(vault, { title: 'Shared', slug: 'alpha-note', now: FIXED_NOW }).note;
+    expect(beta.slug).toBe('beta-note');
+    expect(alpha.slug).toBe('alpha-note');
+    // Tier 2 matches both duplicate titles — smallest slug wins, order-independent.
+    expect(resolveWikiLink('Shared', [beta, alpha])).toBe('alpha-note');
+    expect(resolveWikiLink('shared', [alpha, beta])).toBe('alpha-note');
+    expect(resolveWikiLink('SHARED', [beta, alpha])).toBe('alpha-note');
+  });
+
+  it('honours tier order: slug beats title beats slugify', () => {
+    const vault = freshVault();
+    const slugWinner = createNote(vault, { title: 'Something Else', slug: 'hub', now: FIXED_NOW }).note;
+    const titleWinner = createNote(vault, { title: 'Hub', slug: 'other-hub', now: FIXED_NOW }).note;
+    const titleTwo = createNote(vault, { title: 'Alpha Two', slug: 'alpha-two-note', now: FIXED_NOW }).note;
+    const slugifyTwo = createNote(vault, { title: 'Unrelated', slug: 'alpha-two', now: FIXED_NOW }).note;
+
+    // Tier 1 (slug 'hub') wins even though another note's title is 'Hub'.
+    expect(resolveWikiLink('hub', [titleWinner, slugWinner])).toBe('hub');
+    // Tier 2 (title 'Hub') wins when no slug matches.
+    expect(resolveWikiLink('Hub', [titleWinner])).toBe('other-hub');
+    // Tier 2 (title 'Alpha Two' → alpha-two-note) beats tier 3 (slugify → alpha-two).
+    expect(resolveWikiLink('Alpha Two', [slugifyTwo, titleTwo])).toBe('alpha-two-note');
+    expect(resolveWikiLink('ALPHA TWO', [slugifyTwo, titleTwo])).toBe('alpha-two-note');
+    // Same target, punctuation only → no exact title → tier 3 lands on alpha-two.
+    expect(resolveWikiLink('Alpha Two!!', [slugifyTwo, titleTwo])).toBe('alpha-two');
+  });
+
+  it('feeds the backlink index so render and index can never disagree', () => {
+    const vault = freshVault();
+    createNote(vault, {
+      title: 'Retrieval practice sessions',
+      slug: 'retrieval-practice',
+      now: FIXED_NOW,
+    }).note;
+    createNote(vault, { title: 'Café Society', now: FIXED_NOW }).note;
+    createNote(vault, {
+      title: 'Source',
+      slug: 'source',
+      body: 'See [[Retrieval Practice]] and [[cafe society]] and [[Nope]].',
+      now: FIXED_NOW,
+    }).note;
+
+    const index = refreshVaultIndex(vault);
+    expect(index.backlinks).toEqual({
+      'retrieval-practice': [{ fromSlug: 'source', linkText: 'Retrieval Practice' }],
+      'cafe-society': [{ fromSlug: 'source', linkText: 'cafe society' }],
+    });
+  });
+});

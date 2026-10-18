@@ -1,0 +1,956 @@
+---
+// F3 T005→T014 — `/note/[slug]` reading view + minimal edit surface
+// (spec FR-001…FR-009, D1). SSR only: one read, one index refresh, one
+// markdown-it render per request (plan R3/R7). Page-scoped styles only —
+// `Base.astro` and `global.css` stay untouched (F2 read-only list).
+//
+// This file accumulates the whole page chain in order:
+//   T005 read view      → T006 backlinks panel → T010 edit/save wiring
+//   → T012 `[[` popup   → T014 pending-marker create
+// Every decision comes from `src/lib/wikilink-client.ts` + `src/lib/render.ts`;
+// this component only wires DOM to those pure functions.
+import Base from '../../layouts/Base.astro';
+import { renderNoteBody } from '../../lib/render';
+import {
+  assertValidSlug,
+  NoteNotFoundError,
+  readNoteWithSnapshot,
+  refreshVaultIndex,
+  resolveWikiLink,
+  type Note,
+  type NoteSnapshot,
+  type VaultIndex,
+} from '../../lib/notes';
+import { resolveVaultDir } from '../../lib/vault';
+
+const slug = Astro.params.slug ?? '';
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Friendly 404: no stack trace, no crash (spec FR-001, US1.6). */
+function notFoundResponse(missing: string): Response {
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Note not found — Digital Garden</title>
+  </head>
+  <body>
+    <main>
+      <h1>Note not found</h1>
+      <p>There is no note at <code>/note/${escapeHtml(missing)}</code>.</p>
+      <p><a href="/">Back to the dashboard</a></p>
+    </main>
+  </body>
+</html>
+`;
+  return new Response(html, {
+    status: 404,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+  });
+}
+
+interface NoteView {
+  note: Note;
+  snapshot: NoteSnapshot;
+  index: VaultIndex;
+}
+
+/** Read the note and the vault index; `null` means "unknown slug". */
+function loadView(viewSlug: string): NoteView | null {
+  try {
+    const vault = resolveVaultDir();
+    const { note, snapshot } = readNoteWithSnapshot(vault, viewSlug);
+    return { note, snapshot, index: refreshVaultIndex(vault) };
+  } catch (err) {
+    if (err instanceof NoteNotFoundError) return null;
+    throw err;
+  }
+}
+
+// A slug that can never name a note file is an unknown slug, not a 500.
+try {
+  assertValidSlug(slug);
+} catch {
+  return notFoundResponse(slug);
+}
+
+const view = loadView(slug);
+if (view === null) return notFoundResponse(slug);
+
+const { note, snapshot, index } = view;
+const bodyHtml = renderNoteBody(note.body, (target) => resolveWikiLink(target, index.notes));
+
+// Backlink rows straight from F1's index — no re-filtering (FR-004):
+// self-links, unresolved links and trashed notes are already excluded there.
+const backlinkRows = (index.backlinks[note.slug] ?? []).map((row) => {
+  const source = index.notes.find((n) => n.slug === row.fromSlug);
+  return {
+    fromSlug: row.fromSlug,
+    linkText: row.linkText,
+    title: source?.title ?? row.fromSlug,
+    status: source?.status ?? 'seed',
+  };
+});
+
+// Autocomplete candidates: sorted case-insensitively by title so the popup
+// order is deterministic and row 1 is the default selection (plan R6/SC-004).
+const candidates = index.notes
+  .map((n) => ({ slug: n.slug, title: n.title, status: n.status as string }))
+  .sort((a, b) => {
+    const at = a.title.toLowerCase();
+    const bt = b.title.toLowerCase();
+    if (at < bt) return -1;
+    if (at > bt) return 1;
+    return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+  });
+
+// Embedded page data (plan Interface Contracts §2): the load-time snapshot
+// for the 409 conflict check + the candidates for the popup. `<` is escaped
+// so a title can never terminate the script element early.
+const pageDataJson = JSON.stringify({
+  snapshot: { hash: snapshot.hash, mtimeMs: snapshot.mtimeMs },
+  candidates,
+}).replace(/</g, '\\u003c');
+---
+
+<Base>
+  <article class="note-view">
+    <header class="note-header">
+      <h1>{note.title}</h1>
+      <p class="note-meta">
+        <span class={`status-badge status-${note.status}`}>{note.status}</span>
+        <span class="note-updated">Updated {note.updated}</span>
+      </p>
+      <div class="note-actions">
+        <button type="button" id="note-edit-open">Edit</button>
+      </div>
+      <!-- Inline messages for save errors and pending-create errors (role="alert"). -->
+      <p id="note-status" role="alert"></p>
+    </header>
+
+    <div class="note-columns">
+      <div class="note-main">
+        <!-- T005: server-rendered body. `set:html` output is styled through
+             :global() rules because injected nodes carry no scope attribute. -->
+        <article id="note-body" data-slug={note.slug} set:html={bodyHtml}></article>
+
+        <!-- T010: edit surface. The textarea ships prefilled with the raw
+             source so entering edit mode never re-reads the network. -->
+        <section id="note-edit" hidden>
+          <label class="field-label" for="note-editor">Body (raw Markdown)</label>
+          <textarea id="note-editor" rows="16" spellcheck="false">{note.body}</textarea>
+          <div class="edit-actions">
+            <button type="button" id="note-save">Save</button>
+            <button type="button" id="note-cancel">Cancel</button>
+          </div>
+          <!-- 409 state: nothing is written or discarded until a choice is made. -->
+          <div id="note-conflict" role="alert" hidden>
+            <p id="note-conflict-message">This note changed on disk while you were editing.</p>
+            <div class="edit-actions">
+              <button type="button" id="conflict-reload">Reload from disk</button>
+              <button type="button" id="conflict-overwrite">Overwrite</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- T006: one row per inbound link occurrence (FR-004). -->
+      <aside id="backlinks" aria-labelledby="backlinks-title">
+        <h2 id="backlinks-title">Backlinks</h2>
+        {
+          backlinkRows.length === 0 ? (
+            <p id="backlinks-empty">No backlinks yet</p>
+          ) : (
+            <ul class="backlink-list">
+              {backlinkRows.map((row) => (
+                <li class="backlink-row">
+                  <a class="backlink-source" href={`/note/${row.fromSlug}`}>
+                    {row.title}
+                  </a>
+                  <span class={`status-badge status-${row.status}`}>{row.status}</span>
+                  <span class="backlink-text">{row.linkText}</span>
+                </li>
+              ))}
+            </ul>
+          )
+        }
+      </aside>
+    </div>
+  </article>
+
+  <!-- T012: popup shell — rows are rendered from filterCandidates(). -->
+  <div id="wikilink-popup" role="listbox" aria-label="Note titles" hidden></div>
+
+  <script type="application/json" id="f3-page-data" is:inline set:html={pageDataJson}></script>
+</Base>
+
+<style>
+  /* This page carries a side panel, so it needs more width than the
+     single-column shell — page-scoped, so no other route is affected. */
+  :global(main) {
+    max-width: 64rem;
+  }
+
+  .note-header h1 {
+    font-family: var(--font-ui);
+    font-size: 1.6rem;
+    margin: 0 0 0.35rem;
+    line-height: 1.25;
+  }
+
+  .note-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0;
+    font-family: var(--font-ui);
+    font-size: 0.85rem;
+    opacity: 0.85;
+  }
+
+  .status-badge {
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+  }
+
+  .status-badge.status-archived {
+    background: var(--ink);
+    color: var(--paper);
+    font-weight: 600;
+  }
+
+  .note-actions,
+  .edit-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+  }
+
+  button {
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+    color: var(--paper);
+    background: var(--ink);
+    border: 1px solid var(--ink);
+    border-radius: 4px;
+    padding: 0.4rem 0.9rem;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  #note-cancel,
+  #conflict-overwrite {
+    color: var(--ink);
+    background: var(--paper);
+  }
+
+  #note-status {
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+    margin: 0.5rem 0 0;
+  }
+
+  #note-status:empty {
+    display: none;
+  }
+
+  .note-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 15rem;
+    gap: calc(var(--space) * 1.5);
+    align-items: start;
+    margin-top: calc(var(--space) * 1.25);
+  }
+
+  @media (max-width: 52rem) {
+    .note-columns {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .field-label {
+    display: block;
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    opacity: 0.75;
+    margin-bottom: 0.3rem;
+  }
+
+  #note-editor {
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    padding: 0.6rem;
+    width: 100%;
+    box-sizing: border-box;
+    line-height: 1.5;
+    resize: vertical;
+  }
+
+  #note-editor:focus {
+    outline: 2px solid currentColor;
+    outline-offset: 1px;
+  }
+
+  #note-edit[hidden] {
+    display: none;
+  }
+
+  #note-conflict {
+    border: 1px solid currentColor;
+    border-left-width: 4px;
+    border-radius: 4px;
+    padding: 0.75rem;
+    margin-top: 0.6rem;
+    font-family: var(--font-ui);
+  }
+
+  #note-conflict[hidden] {
+    display: none;
+  }
+
+  #note-conflict-message {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+  }
+
+  /* ---- Backlinks panel ---- */
+
+  #backlinks {
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    padding: 0.75rem;
+    font-family: var(--font-ui);
+    position: sticky;
+    top: calc(var(--space) * 1.5);
+  }
+
+  #backlinks h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 0.5rem;
+    opacity: 0.75;
+  }
+
+  #backlinks-empty {
+    font-size: 0.9rem;
+    opacity: 0.7;
+    margin: 0;
+  }
+
+  .backlink-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .backlink-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.9rem;
+  }
+
+  .backlink-source {
+    color: inherit;
+    font-weight: 600;
+  }
+
+  .backlink-text {
+    opacity: 0.75;
+    overflow-wrap: anywhere;
+  }
+
+  /* ---- Rendered note body (set:html output → :global selectors) ---- */
+
+  :global(#note-body) {
+    font-family: var(--font-body);
+    line-height: 1.65;
+  }
+
+  :global(#note-body h1),
+  :global(#note-body h2),
+  :global(#note-body h3),
+  :global(#note-body h4) {
+    font-family: var(--font-ui);
+    line-height: 1.3;
+    margin: 1.4rem 0 0.5rem;
+  }
+
+  :global(#note-body h1) {
+    font-size: 1.5rem;
+  }
+
+  :global(#note-body h2) {
+    font-size: 1.3rem;
+  }
+
+  :global(#note-body h3) {
+    font-size: 1.15rem;
+  }
+
+  :global(#note-body ul),
+  :global(#note-body ol) {
+    padding-left: 1.4rem;
+  }
+
+  :global(#note-body code) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+  }
+
+  :global(#note-body pre) {
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+    padding: 0.75rem;
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+
+  :global(#note-body pre code) {
+    background: none;
+    padding: 0;
+  }
+
+  :global(#note-body blockquote) {
+    border-left: 3px solid currentColor;
+    margin-left: 0;
+    padding-left: 0.9rem;
+    opacity: 0.85;
+  }
+
+  :global(#note-body table) {
+    border-collapse: collapse;
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+  }
+
+  :global(#note-body th),
+  :global(#note-body td) {
+    border: 1px solid currentColor;
+    padding: 0.3rem 0.55rem;
+    text-align: left;
+  }
+
+  /* Resolved wiki-links vs. pending markers (FR-002). */
+  :global(#note-body .wikilink) {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  :global(#note-body .wikilink.pending) {
+    text-decoration: none;
+    border-bottom: 2px dotted currentColor;
+    opacity: 0.75;
+    cursor: pointer;
+  }
+
+  :global(#note-body .wikilink.pending:hover) {
+    opacity: 1;
+  }
+
+  :global(#note-body .wikilink:focus-visible) {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+  }
+
+  /* ---- Autocomplete popup (rows are created by the page script) ---- */
+
+  #wikilink-popup {
+    position: fixed;
+    z-index: 60;
+    min-width: 14rem;
+    max-width: 22rem;
+    max-height: 14rem;
+    overflow-y: auto;
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+  }
+
+  #wikilink-popup[hidden] {
+    display: none;
+  }
+
+  :global(.wikilink-option) {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.35rem 0.6rem;
+    cursor: pointer;
+  }
+
+  :global(.wikilink-option.is-active) {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  :global(.wikilink-option .option-slug) {
+    font-size: 0.75rem;
+    opacity: 0.65;
+    overflow-wrap: anywhere;
+  }
+</style>
+
+<script>
+  // Page wiring for `/note/[slug]` (T010 edit/save, T012 popup, T014 pending).
+  // Pure decisions live in `src/lib/wikilink-client.ts`; rendering lives in
+  // `src/lib/render.ts`. This block only binds DOM events to those functions.
+  import {
+    acceptSelection,
+    autocompleteKeyCommand,
+    conflictDecision,
+    dismissAutocomplete,
+    enterEdit,
+    escapeDecision,
+    extractQuery,
+    filterCandidates,
+    isDirty,
+    leaveEdit,
+    markDirty,
+    moveSelection,
+    pendingCreateDecision,
+    saveDecision,
+    savePayload,
+    submitPendingCreate,
+    submitSave,
+    type EditState,
+    type NoteCandidate,
+    type NoteRequestInit,
+    type PendingPorts,
+    type SaveResponsePorts,
+  } from '../../lib/wikilink-client';
+
+  /* ------------------------------------------------------------------ *
+   * Elements
+   * ------------------------------------------------------------------ */
+  const noteBody = document.getElementById('note-body') as HTMLElement;
+  const editRegion = document.getElementById('note-edit') as HTMLElement;
+  const editOpenBtn = document.getElementById('note-edit-open') as HTMLButtonElement;
+  const textarea = document.getElementById('note-editor') as HTMLTextAreaElement;
+  const saveBtn = document.getElementById('note-save') as HTMLButtonElement;
+  const cancelBtn = document.getElementById('note-cancel') as HTMLButtonElement;
+  const statusEl = document.getElementById('note-status') as HTMLParagraphElement;
+  const conflictEl = document.getElementById('note-conflict') as HTMLElement;
+  const conflictMsgEl = document.getElementById('note-conflict-message') as HTMLParagraphElement;
+  const conflictReloadBtn = document.getElementById('conflict-reload') as HTMLButtonElement;
+  const conflictOverwriteBtn = document.getElementById('conflict-overwrite') as HTMLButtonElement;
+  const popupEl = document.getElementById('wikilink-popup') as HTMLElement;
+  const pageDataEl = document.getElementById('f3-page-data') as HTMLScriptElement;
+
+  const slug = noteBody.dataset.slug ?? '';
+  const pageData = JSON.parse(pageDataEl.textContent || '{}') as {
+    snapshot?: { hash?: string; mtimeMs?: number };
+    candidates?: NoteCandidate[];
+  };
+  const baseHash = pageData.snapshot?.hash ?? '';
+  const candidates: NoteCandidate[] = Array.isArray(pageData.candidates)
+    ? pageData.candidates
+    : [];
+
+  /* ------------------------------------------------------------------ *
+   * State
+   * ------------------------------------------------------------------ */
+  let editState: EditState = leaveEdit();
+  let saveInFlight = false;
+  let pendingInFlight = false;
+  let activeMarker: HTMLAnchorElement | null = null;
+
+  interface PopupState {
+    open: boolean;
+    query: string | null;
+    selection: number;
+    rows: NoteCandidate[];
+  }
+  let popup: PopupState = { open: false, query: null, selection: -1, rows: [] };
+  /** Query whose popup was dismissed with Esc — it must not reopen itself. */
+  let dismissedFor: string | null = null;
+
+  /* ------------------------------------------------------------------ *
+   * Ports handed to the pure modules (pages only wire DOM)
+   * ------------------------------------------------------------------ */
+  const savePorts: SaveResponsePorts & {
+    fetch(url: string, init: NoteRequestInit): Promise<Response>;
+  } = {
+    fetch: (url, init) => window.fetch(url, init),
+    reload: () => location.reload(),
+    setStatus: (message) => {
+      statusEl.textContent = message;
+    },
+    setControlsEnabled: (enabled) => {
+      saveBtn.disabled = !enabled;
+      cancelBtn.disabled = !enabled;
+      editOpenBtn.disabled = !enabled;
+    },
+    showConflict: (disk) => {
+      conflictEl.hidden = false;
+      conflictMsgEl.textContent = disk.updated
+        ? `This note changed on disk at ${disk.updated}. Reload it to take the disk copy, or overwrite it with yours.`
+        : 'This note changed on disk while you were editing.';
+    },
+    focusConflictControl: () => {
+      // Reveal happens first (focus() inside a hidden box is a silent no-op),
+      // then focus moves to the content-preserving choice (FR-007).
+      conflictReloadBtn.focus();
+    },
+  };
+
+  const pendingPorts: PendingPorts & {
+    fetch(url: string, init: NoteRequestInit): Promise<Response>;
+  } = {
+    fetch: (url, init) => window.fetch(url, init),
+    assign: (url) => location.assign(url),
+    setStatus: (message) => {
+      statusEl.textContent = message;
+    },
+    enableMarker: () => {
+      activeMarker?.removeAttribute('aria-disabled');
+    },
+  };
+
+  /* ------------------------------------------------------------------ *
+   * T010 — edit mode, save, Esc, conflict choices
+   * ------------------------------------------------------------------ */
+  function openEdit(): void {
+    editState = enterEdit(textarea.value); // textarea ships prefilled (SSR)
+    noteBody.hidden = true;
+    editRegion.hidden = false;
+    statusEl.textContent = '';
+    conflictEl.hidden = true;
+    textarea.focus();
+  }
+
+  function closeEdit(): void {
+    editState = leaveEdit();
+    editRegion.hidden = true;
+    noteBody.hidden = false;
+    statusEl.textContent = '';
+    conflictEl.hidden = true;
+    closePopup();
+    editOpenBtn.focus();
+  }
+
+  async function runSave(force: boolean): Promise<void> {
+    if (saveDecision({ inFlight: saveInFlight, body: textarea.value }) === 'ignore') return;
+    saveInFlight = true;
+    savePorts.setControlsEnabled(false);
+    statusEl.textContent = '';
+    try {
+      await submitSave(savePayload(slug, textarea.value, baseHash, force), savePorts);
+    } catch {
+      // Transport failure: loud inline error, never a silent "saved".
+      statusEl.textContent = 'The note could not be saved.';
+      savePorts.setControlsEnabled(true);
+    } finally {
+      saveInFlight = false;
+    }
+  }
+
+  editOpenBtn.addEventListener('click', openEdit);
+
+  textarea.addEventListener('input', () => {
+    if (editState.editing) editState = markDirty(editState, textarea.value);
+    refreshPopup();
+  });
+
+  saveBtn.addEventListener('click', () => void runSave(false));
+
+  cancelBtn.addEventListener('click', () => {
+    const decision = escapeDecision({
+      dirty: isDirty(editState),
+      confirm: (message) => window.confirm(message),
+    });
+    if (decision === 'leave') closeEdit();
+    else textarea.focus(); // 'stay' — the buffer is kept exactly as typed
+  });
+
+  conflictReloadBtn.addEventListener('click', () => {
+    const decision = conflictDecision({
+      choice: 'reload',
+      confirm: (message) => window.confirm(message),
+    });
+    if (decision === 'reload') location.reload();
+  });
+
+  conflictOverwriteBtn.addEventListener('click', () => {
+    if (conflictDecision({ choice: 'overwrite' }) === 'overwrite') void runSave(true);
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !editState.editing) return;
+    if (popup.open) return; // the editor's own handler owns Esc while open
+    event.preventDefault();
+    const decision = escapeDecision({
+      dirty: isDirty(editState),
+      confirm: (message) => window.confirm(message),
+    });
+    if (decision === 'leave') closeEdit();
+    else textarea.focus();
+  });
+
+  /* ------------------------------------------------------------------ *
+   * T012 — `[[` autocomplete popup
+   * ------------------------------------------------------------------ */
+  let mirror: HTMLDivElement | null = null;
+
+  /** Viewport position for the caret, via a hidden text mirror (fallback: box). */
+  function caretViewport(): { left: number; top: number } {
+    const box = textarea.getBoundingClientRect();
+    try {
+      const cs = getComputedStyle(textarea);
+      const padL = parseFloat(cs.paddingLeft) || 0;
+      const padR = parseFloat(cs.paddingRight) || 0;
+      const padT = parseFloat(cs.paddingTop) || 0;
+      const padB = parseFloat(cs.paddingBottom) || 0;
+      const borderL = parseFloat(cs.borderLeftWidth) || 0;
+      const borderT = parseFloat(cs.borderTopWidth) || 0;
+      const borderR = parseFloat(cs.borderRightWidth) || 0;
+      const borderB = parseFloat(cs.borderBottomWidth) || 0;
+
+      if (!mirror) {
+        mirror = document.createElement('div');
+        mirror.setAttribute('aria-hidden', 'true');
+        mirror.style.position = 'absolute';
+        mirror.style.visibility = 'hidden';
+        mirror.style.pointerEvents = 'none';
+        mirror.style.whiteSpace = 'pre-wrap';
+        mirror.style.overflowWrap = 'break-word';
+        mirror.style.boxSizing = 'content-box';
+        document.body.appendChild(mirror);
+      }
+
+      mirror.style.font = cs.font;
+      mirror.style.lineHeight = cs.lineHeight;
+      mirror.style.letterSpacing = cs.letterSpacing;
+      mirror.style.textIndent = cs.textIndent;
+      mirror.style.textAlign = cs.textAlign;
+      mirror.style.textTransform = cs.textTransform;
+      mirror.style.wordSpacing = cs.wordSpacing;
+      mirror.style.padding = `${padT}px ${padR}px ${padB}px ${padL}px`;
+      // clientWidth excludes border + scrollbar and includes padding.
+      mirror.style.width = `${Math.max(textarea.clientWidth - padL - padR, 0)}px`;
+      mirror.style.left = `${box.left + window.scrollX + borderL}px`;
+      mirror.style.top = `${box.top + window.scrollY + borderT - textarea.scrollTop}px`;
+      mirror.style.margin = '0';
+      mirror.style.border = '0';
+
+      const caret = textarea.selectionStart ?? textarea.value.length;
+      const marker = document.createElement('span');
+      marker.textContent = '​';
+      mirror.replaceChildren(document.createTextNode(textarea.value.slice(0, caret)), marker);
+
+      const r = marker.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) throw new Error('mirror collapsed');
+      const left = Math.min(r.left, window.innerWidth - 12);
+      const top = r.bottom > window.innerHeight ? r.top : r.bottom;
+      return { left, top };
+    } catch {
+      // Fallback: anchor to the editor box (never worse than "visible").
+      return { left: box.left, top: box.bottom };
+    }
+  }
+
+  function positionPopup(): void {
+    if (!popup.open) return;
+    const { left, top } = caretViewport();
+    popupEl.style.left = `${Math.max(left, 4)}px`;
+    popupEl.style.top = `${Math.max(top, 4)}px`;
+    // Flip above the caret when there is no room below.
+    const rect = popupEl.getBoundingClientRect();
+    if (rect.bottom > window.innerHeight - 4 && top - rect.height > 4) {
+      popupEl.style.top = `${top - rect.height - 4}px`;
+    }
+  }
+
+  function closePopup(): void {
+    popup = { ...dismissAutocomplete(), rows: [] };
+    popupEl.hidden = true;
+    popupEl.replaceChildren();
+    textarea.removeAttribute('aria-activedescendant');
+  }
+
+  function renderPopup(): void {
+    popupEl.replaceChildren();
+    if (!popup.open || popup.rows.length === 0) {
+      popupEl.hidden = true;
+      textarea.removeAttribute('aria-activedescendant');
+      return;
+    }
+    popup.rows.forEach((candidate, i) => {
+      const row = document.createElement('div');
+      row.className = `wikilink-option${i === popup.selection ? ' is-active' : ''}`;
+      row.id = `wikilink-option-${i}`;
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', i === popup.selection ? 'true' : 'false');
+      const title = document.createElement('span');
+      title.className = 'option-title';
+      title.textContent = candidate.title;
+      const slugEl = document.createElement('span');
+      slugEl.className = 'option-slug';
+      slugEl.textContent = candidate.slug;
+      row.append(title, slugEl);
+      row.addEventListener('click', () => {
+        popup.selection = i;
+        acceptRow();
+      });
+      popupEl.appendChild(row);
+    });
+    popupEl.hidden = false;
+    textarea.setAttribute('aria-activedescendant', `wikilink-option-${popup.selection}`);
+    positionPopup();
+  }
+
+  function refreshPopup(): void {
+    const caret = textarea.selectionStart ?? textarea.value.length;
+    const query = extractQuery(textarea.value, caret);
+
+    if (query === null) {
+      dismissedFor = null;
+      if (popup.open) closePopup();
+      return;
+    }
+    if (dismissedFor !== null && query === dismissedFor) {
+      // Esc closed this query — only a real edit may bring it back.
+      if (popup.open) closePopup();
+      return;
+    }
+    dismissedFor = null;
+
+    if (popup.open && popup.query === query) {
+      positionPopup(); // caret moved, query unchanged → keep the selection
+      return;
+    }
+
+    const rows = filterCandidates(query, candidates);
+    popup = {
+      open: rows.length > 0,
+      query,
+      selection: rows.length > 0 ? 0 : -1,
+      rows,
+    };
+    renderPopup();
+  }
+
+  function acceptRow(): void {
+    const caret = textarea.selectionStart ?? textarea.value.length;
+    const query = extractQuery(textarea.value, caret);
+    const row = popup.rows[popup.selection];
+    if (query === null || !row) {
+      closePopup();
+      return;
+    }
+    const start = caret - query.length - 2; // the whole `[[query` construct
+    if (start < 0) {
+      closePopup();
+      return;
+    }
+    const { replacement, delta } = acceptSelection(query, row);
+    const next = textarea.value.slice(0, start) + replacement + textarea.value.slice(caret);
+    textarea.value = next;
+    const nextCaret = caret + delta;
+    textarea.setSelectionRange(nextCaret, nextCaret);
+    if (editState.editing) editState = markDirty(editState, next);
+    closePopup();
+    textarea.focus();
+  }
+
+  /** THE key handler: one listener, popup-scoped, printable keys untouched. */
+  textarea.addEventListener('keydown', (event) => {
+    const command = autocompleteKeyCommand({
+      key: event.key,
+      popupOpen: popup.open,
+    });
+    if (command === null) return; // popup closed → nothing app-level happens
+
+    event.preventDefault();
+    if (command === 'up' || command === 'down') {
+      popup.selection = moveSelection(
+        command === 'up' ? -1 : 1,
+        popup.rows.length,
+        popup.selection,
+      );
+      renderPopup();
+      return;
+    }
+    if (command === 'enter' || command === 'tab') {
+      acceptRow();
+      return;
+    }
+    // 'escape' → close the popup ONLY; the buffer keeps `[[query`.
+    event.stopPropagation(); // …and stop the document-level discard flow
+    dismissedFor = popup.query;
+    closePopup();
+  });
+
+  // Caret/selection changed by typing, arrows or a click → re-filter/re-position.
+  textarea.addEventListener('keyup', refreshPopup);
+  textarea.addEventListener('click', refreshPopup);
+
+  /* ------------------------------------------------------------------ *
+   * T014 — pending-marker create (exactly one in flight per marker)
+   * ------------------------------------------------------------------ */
+  document.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement | null;
+    const marker = target?.closest?.('a.wikilink.pending') as HTMLAnchorElement | null;
+    if (!marker) return;
+
+    // The marker must never follow `href="#"` itself (FR-009).
+    event.preventDefault();
+    const targetText = marker.dataset.target ?? '';
+    if (pendingCreateDecision({ inFlight: pendingInFlight, target: targetText }) === 'ignore') {
+      return;
+    }
+
+    pendingInFlight = true;
+    activeMarker = marker;
+    marker.setAttribute('aria-disabled', 'true');
+    statusEl.textContent = '';
+    void (async () => {
+      try {
+        // 201 → navigates to the new note; 409 → navigates to the existing
+        // one; 400/500 → inline error and the page stays put.
+        await submitPendingCreate(targetText, pendingPorts);
+      } catch {
+        statusEl.textContent = 'That note could not be created.';
+      } finally {
+        pendingInFlight = false;
+        activeMarker?.removeAttribute('aria-disabled');
+        activeMarker = null;
+      }
+    })();
+  });
+</script>
