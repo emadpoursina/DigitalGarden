@@ -60,6 +60,75 @@ Response contract: `201 {slug, status, git:{committed, reason?}}`,
 `409 {error:'slug-conflict', slug}`, `400 {error:'title-required' |
 'invalid-payload'}`, `500 {error:'save-failed', message}`, `405` on GET.
 
+## Reading, wiki-links & backlinks (F3)
+
+`/note/<slug>` is the reading view: server-rendered Markdown with a
+Backlinks panel beside it, a raw-Markdown edit surface, `[[` autocomplete
+and click-to-create pending links. Unknown slugs answer `404` with a
+friendly page (no stack trace).
+
+**Canonical resolution (spec FR-003).** A `[[target]]` resolves
+case-insensitively in three tiers — the first tier with a match wins, and
+ties inside a tier break to the lexicographically smallest slug:
+
+1. **exact slug** — `[[retrieval-practice]]`
+2. **exact title** — `[[Retrieval practice sessions]]`
+3. **slugify equivalence** — `[[Retrieval Practice]]`,
+   `[[RETRIEVAL-PRACTICE]]` and `[[cafe society]]` (accents/punctuation
+   collapsed) land on `retrieval-practice` / `cafe-society`
+
+Only a genuine miss at all three tiers stays unresolved. One function
+(`resolveWikiLink` in `src/lib/notes.ts`) drives rendering, the backlink
+index and link insertion, so the three can never disagree.
+
+**Rendering (`src/lib/render.ts`).** `[[target]]` / `[[target|alias]]`
+become links to `/note/<slug>` with the alias as the display text when
+written; unresolved targets become focusable pending markers carrying
+`data-target`. `[[#heading]]`, `[[]]` and whitespace-only targets stay
+literal (matching F1's extractor), `[[..]]` inside code spans/fences stays
+code, and raw HTML in a body is escaped — never executed.
+
+**Backlinks panel.** One row per inbound link occurrence: the referencing
+note's title (a link to its view), its status (archived visibly flagged)
+and the link text as written. Self-links, unresolved links and trashed
+notes are excluded by F1's index; archived sources stay in it (D4). The
+index is recomputed per view **and** on every save: `POST /api/note` calls
+`refreshVaultIndex()` inside the same request and answers with the fresh
+`backlinks` object, so a saved link shows up on the target's next view with
+no manual rebuild step anywhere.
+
+**Editing & saving.** `Edit` swaps in a raw-Markdown textarea prefilled
+with the source — body only; title/status/tags editing belongs to F4/F8.
+`Save` POSTs `{slug, body, baseHash, force?}` and reloads read mode from
+disk; `Esc`/`Cancel` confirm first when the buffer is dirty, and leave it
+alone when it is clean. If the file changed on disk while you were editing,
+the save answers `409 external-edit-conflict` and the page shows two
+keyboard-reachable choices — **Reload from disk** (confirms first, discards
+your buffer) or **Overwrite** (`force: true`, the only source of `force`) —
+and neither side is touched until you pick one.
+
+**Autocomplete & pending links.** Typing `[[` in the editor opens a popup
+of existing titles, filtered case-insensitively as you type (row 1 is the
+default selection; duplicate titles show their slug). Up/Down/Enter/Tab/Esc
+act **only while the popup is open** — with it closed those keys are inert,
+and no printable key is ever intercepted. Clicking a pending marker creates
+exactly one note through `POST /api/capture` (title = the target, `seed` /
+`private`, empty body) and navigates to its view; a slug collision
+navigates to the existing note instead of overwriting, and a failure shows
+an inline error and changes nothing.
+
+`POST /api/note` response contract: `200 {slug, updated, backlinks}`,
+`409 {error:'external-edit-conflict', disk:{updated, hash}}`,
+`404 {error:'note-not-found', slug}`, `400 {error:'invalid-payload'}` (bad
+or incomplete payload, nothing written), `500 {error:'save-failed',
+message}`, `405` on GET.
+
+> **Known gap until F9:** edit saves write the file but create **no git
+> commit** — commit-on-save (with its settings toggle and push) is F9's
+> acceptance criterion. Quick captures still commit
+> (`docs(note): capture <slug>`), so between F3 and F9 edits are on disk
+> but missing from git history. This is deliberate, not an oversight.
+
 ## Vault location (`GARDEN_VAULT_DIR`)
 
 `src/lib/vault.ts` → `resolveVaultDir()` is the only place in the app that
@@ -87,8 +156,9 @@ deliberately want commits on the feature branch.
 Since F2 the app is server-rendered, not a static build:
 
 - `astro.config.mjs` sets `output: 'server'` with
-  `adapter: node({ mode: 'standalone' })` — `/`, `/new` and
-  `POST /api/capture` are on-demand routes.
+  `adapter: node({ mode: 'standalone' })` — `/`, `/new`,
+  `/note/<slug>` and the `POST /api/capture` + `POST /api/note`
+  endpoints are on-demand routes.
 - `npm run build` writes `dist/server/` (server entry + app) and
   `dist/client/` (bundled assets).
 - **Loopback only.** The server binds `localhost`; `astro dev` prints

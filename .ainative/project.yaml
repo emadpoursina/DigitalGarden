@@ -2,10 +2,13 @@
 # onboarding (2026-10-14). Never edit the template in place. Source:
 # AiNative docs/knowledge/setup/new-project.md.
 #
-# The TODO placeholder below is intentional at onboarding time. The loop
-# blocks cards until project-bootstrapper replaces it with real commands
-# that prove the scaffold runs.
+# Real commands (project-bootstrapper, 2026-10-14) — they prove the
+# scaffold runs: install materialises dependencies, the vitest suite
+# exercises the pure lib modules and API handlers, and the Astro build
+# proves the SSR app compiles. Keep this list in this order; D8/FR-011
+# pin `npm install` + `npm run test` + `npm run build` as the gate.
 
 validation_commands:
   - npm install
+  - npm run test
   - npm run build
