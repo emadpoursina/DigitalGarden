@@ -289,3 +289,173 @@ describe('POST /api/note', () => {
     expect(statSync(join(vault, 'tracked.md')).isFile()).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F4 T005 — extended status contract (plan Interface Contracts §1, D3, Q1/Q5)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/note — F4 status contract', () => {
+  /** Everything a status-only save must leave byte-identical on disk. */
+  function contentOf(slug: string): Record<string, unknown> {
+    const n = readNote(vault, slug);
+    return {
+      title: n.title,
+      slug: n.slug,
+      tags: n.tags,
+      body: n.body,
+      visibility: n.visibility,
+      created: n.created,
+    };
+  }
+
+  it('200: status-only save flips status, keeps disk truth, bumps `updated` monotonically (AC2/Q5)', async () => {
+    createNote(vault, {
+      title: 'Lifecycle',
+      slug: 'lifecycle',
+      body: 'the original body',
+      tags: ['alpha', 'beta'],
+    });
+    const before = readNote(vault, 'lifecycle');
+    expect(before.status).toBe('seed');
+    const contentBefore = contentOf('lifecycle');
+    const filesBefore = readdirSync(vault).sort();
+
+    const res = await post({
+      slug: 'lifecycle',
+      status: 'growing',
+      baseHash: hashOf('lifecycle'),
+    });
+
+    expect(res.status).toBe(200);
+    const sent = (await res.json()) as { slug: string; status: string; updated: string; backlinks: unknown };
+    expect(sent.slug).toBe('lifecycle');
+    expect(sent.status).toBe('growing'); // 200 carries the SAVED value (contract §1)
+    expect(typeof sent.updated).toBe('string');
+
+    const after = readNote(vault, 'lifecycle');
+    expect(after.status).toBe('growing');
+    // Disk truth for every field that was NOT sent (Q1) — byte-identical.
+    expect(contentOf('lifecycle')).toEqual(contentBefore);
+    expect(after.body).toBe('the original body');
+    expect(after.tags).toEqual(['alpha', 'beta']);
+    // Q5: monotonic, never strict inequality (same-millisecond writes happen).
+    expect(after.updated >= before.updated).toBe(true);
+    // Only the note file changed — no new files appeared.
+    expect(readdirSync(vault).sort()).toEqual(filesBefore);
+  });
+
+  it('200: body + status in one payload both apply', async () => {
+    createNote(vault, { title: 'Both Fields', slug: 'both-fields', body: 'before' });
+    const baseHash = hashOf('both-fields');
+
+    const res = await post({
+      slug: 'both-fields',
+      body: 'after',
+      status: 'evergreen',
+      baseHash,
+    });
+
+    expect(res.status).toBe(200);
+    const sent = (await res.json()) as { status: string };
+    expect(sent.status).toBe('evergreen');
+    const note = readNote(vault, 'both-fields');
+    expect(note.body).toBe('after');
+    expect(note.status).toBe('evergreen');
+  });
+
+  it('400: out-of-enum status → invalid-payload with the vault completely untouched', async () => {
+    createNote(vault, { title: 'Untouched Status', slug: 'untouched-status', body: 'keep me' });
+    const before = bytes('untouched-status');
+    const filesBefore = readdirSync(vault).sort();
+
+    for (const bad of ['mature', 'SEED', 42, '', null]) {
+      const res = await post({
+        slug: 'untouched-status',
+        status: bad,
+        baseHash: hashOf('untouched-status'),
+      });
+      expect(res.status).toBe(400);
+      expect(res.headers.get('content-type')).toContain('application/json');
+      expect(await res.json()).toEqual({ error: 'invalid-payload' });
+      expect(bytes('untouched-status')).toEqual(before);
+      expect(readdirSync(vault).sort()).toEqual(filesBefore);
+    }
+    expect(readNote(vault, 'untouched-status').status).toBe('seed');
+  });
+
+  it('400: { slug, baseHash } with neither body nor status (at-least-one rule, Q1)', async () => {
+    createNote(vault, { title: 'No Fields', slug: 'no-fields', body: 'stays' });
+    const before = bytes('no-fields');
+
+    const res = await post({ slug: 'no-fields', baseHash: hashOf('no-fields') });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-payload' });
+    expect(bytes('no-fields')).toEqual(before);
+  });
+
+  it('409 then force:true: a stale-hash status change never silently overwrites disk (SC-002)', async () => {
+    createNote(vault, { title: 'Status Conflict', slug: 'status-conflict', body: 'page-load body' });
+    const staleHash = hashOf('status-conflict');
+    const file = join(vault, 'status-conflict.md');
+    writeFileSync(file, `${readFileSync(file, 'utf8')}external change\n`, 'utf8');
+    const external = readFileSync(file);
+
+    const conflict = await post({
+      slug: 'status-conflict',
+      status: 'evergreen',
+      baseHash: staleHash,
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ error: 'external-edit-conflict' });
+    // Nothing written: neither the external edit nor the status moved.
+    expect(readFileSync(file)).toEqual(external);
+    expect(readNote(vault, 'status-conflict').status).toBe('seed');
+
+    const forced = await post({
+      slug: 'status-conflict',
+      status: 'evergreen',
+      baseHash: staleHash,
+      force: true,
+    });
+    expect(forced.status).toBe(200);
+    const note = readNote(vault, 'status-conflict');
+    expect(note.status).toBe('evergreen'); // the status applied…
+    expect(note.body).toContain('external change'); // …and the DISK body survived (disk truth)
+  });
+
+  it('FR-006: a status save creates NO git commit — the seed commit is still HEAD', async () => {
+    createNote(vault, { title: 'Committed Seed', slug: 'committed-seed', body: 'v1' });
+    seedCommit(vault);
+    const logBefore = git(vault, 'log', '--oneline');
+
+    const res = await post({
+      slug: 'committed-seed',
+      status: 'archived',
+      baseHash: hashOf('committed-seed'),
+    });
+    expect(res.status).toBe(200);
+    expect(readNote(vault, 'committed-seed').status).toBe('archived');
+
+    expect(git(vault, 'log', '--oneline')).toBe(logBefore);
+    expect(git(vault, 'log', '--oneline').trim().split('\n')).toHaveLength(1);
+    // …and git sees the working-tree change, i.e. the status landed uncommitted.
+    expect(git(vault, 'status', '--porcelain')).toContain('committed-seed.md');
+  });
+
+  it('regression: F3 body-save behavior is untouched by the extension', async () => {
+    // The eight F3 cases above run untouched in the same suite; this pins the
+    // two contract facts the extension could have disturbed: a body-only save
+    // still does NOT flip status, and it now reports the status it kept.
+    createNote(vault, { title: 'Body Only', slug: 'body-only', body: 'v1', tags: ['t'] });
+    const res = await post({ slug: 'body-only', body: 'v2', baseHash: hashOf('body-only') });
+    expect(res.status).toBe(200);
+    const sent = (await res.json()) as { status: string; backlinks: unknown };
+    expect(sent.status).toBe('seed');
+    expect(sent.backlinks).toEqual({});
+    const note = readNote(vault, 'body-only');
+    expect(note.body).toBe('v2');
+    expect(note.status).toBe('seed');
+    expect(note.tags).toEqual(['t']);
+  });
+});

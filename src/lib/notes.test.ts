@@ -21,6 +21,7 @@ import {
   listNoteSlugs,
   listTrash,
   NoteNotFoundError,
+  NoteValidationError,
   parseNoteFile,
   readNote,
   readNoteWithSnapshot,
@@ -445,5 +446,51 @@ describe('resolveWikiLink three-tier rule (F3 FR-003 / AC4)', () => {
       'retrieval-practice': [{ fromSlug: 'source', linkText: 'Retrieval Practice' }],
       'cafe-society': [{ fromSlug: 'source', linkText: 'cafe society' }],
     });
+  });
+});
+
+describe('F4 AC1 — lifecycle status default & enum lock (D2)', () => {
+  // The OTHER half of AC1 — `createNote(vault, { title })` with no `status`
+  // writing `status: seed` into the on-disk frontmatter — is already locked
+  // by the AC1 case "writes a UTF-8 Markdown file with full frontmatter and
+  // defaults" above (`note.status === 'seed'` plus a re-parse of the bytes
+  // that landed on disk). Referenced here, not duplicated.
+  //
+  // These are pure regression locks: `src/lib/notes.ts` is ZERO-hunk for F4
+  // (D2 — verify + regression-test, never re-plumb).
+
+  it("parseNoteFile defaults a missing frontmatter `status` key to 'seed'", () => {
+    const raw = [
+      '---',
+      'title: No Status Key',
+      'slug: no-status-key',
+      'visibility: private',
+      'created: 2026-10-14',
+      'updated: 2026-10-14',
+      '---',
+      '',
+      'Body without a status line.',
+      '',
+    ].join('\n');
+    expect(raw).not.toContain('status:'); // the fixture really has no key
+    expect(parseNoteFile(raw).status).toBe('seed');
+  });
+
+  it('rejects an out-of-enum status in a file with NoteValidationError', () => {
+    const raw = [
+      '---',
+      'title: Bad Status',
+      'slug: bad-status',
+      'status: mature',
+      'visibility: private',
+      'created: 2026-10-14',
+      'updated: 2026-10-14',
+      '---',
+      '',
+      'Body.',
+      '',
+    ].join('\n');
+    expect(() => parseNoteFile(raw)).toThrow(NoteValidationError);
+    expect(() => parseNoteFile(raw)).toThrow(/Invalid status "mature"/);
   });
 });
