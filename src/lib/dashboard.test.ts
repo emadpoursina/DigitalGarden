@@ -16,7 +16,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { RECENT_NOTES_LIMIT, selectRecentNotes } from './dashboard';
+import { RECENT_NOTES_LIMIT, SEEDS_ATTENTION_LIMIT, selectRecentNotes, selectSeedsNeedingAttention } from './dashboard';
 import { listNoteSlugs } from './notes';
 
 interface Fixture {
@@ -127,5 +127,107 @@ describe('selectRecentNotes', () => {
     expect(selectRecentNotes(input, -3)).toEqual([]);
     expect(selectRecentNotes(input, Number.NaN)).toEqual([]);
     expect(selectRecentNotes(input, 1.9)).toHaveLength(1);
+  });
+});
+
+/* ================================================================== *
+ * F4 T010 — `selectSeedsNeedingAttention` (D5, plan contract §5, US3)
+ * ================================================================== */
+
+describe('selectSeedsNeedingAttention', () => {
+  function seed(slug: string, updated: string, status = 'seed'): Fixture {
+    return { slug, title: slug, status, updated };
+  }
+
+  it('keeps ONLY seeds — growing/evergreen/archived are excluded', () => {
+    const input = [
+      seed('a-seed', '2026-01-01T00:00:00.000Z', 'seed'),
+      seed('b-growing', '2026-01-02T00:00:00.000Z', 'growing'),
+      seed('c-evergreen', '2026-01-03T00:00:00.000Z', 'evergreen'),
+      seed('d-archived', '2026-01-04T00:00:00.000Z', 'archived'),
+      seed('e-seed', '2026-01-05T00:00:00.000Z', 'seed'),
+    ];
+
+    expect(selectSeedsNeedingAttention(input, 10).map((n) => n.slug)).toEqual([
+      'a-seed',
+      'e-seed',
+    ]);
+  });
+
+  it('orders LEAST recently updated first (ascending)', () => {
+    const input = [
+      seed('newer', '2026-03-05T12:00:00.000Z'),
+      seed('oldest', '2026-01-02T08:00:00.000Z'),
+      seed('middle', '2026-02-14T09:30:00.000Z'),
+    ];
+
+    expect(selectSeedsNeedingAttention(input, 5).map((n) => n.slug)).toEqual([
+      'oldest',
+      'middle',
+      'newer',
+    ]);
+  });
+
+  it('breaks ties on `updated` deterministically by slug', () => {
+    const same = '2026-07-01T10:00:00.000Z';
+    const input = [seed('zulu', same), seed('alpha', same), seed('mike', same)];
+
+    expect(selectSeedsNeedingAttention(input, 3).map((n) => n.slug)).toEqual([
+      'alpha',
+      'mike',
+      'zulu',
+    ]);
+  });
+
+  it('caps at the given limit and clamps nonsense limits', () => {
+    const input = Array.from({ length: 7 }, (_, i) =>
+      // 00:00:00, 01:00:00 … so ascending index == ascending time
+      seed(`seed-${i}`, `2026-05-01T${String(i).padStart(2, '0')}:00:00.000Z`),
+    );
+
+    expect(selectSeedsNeedingAttention(input, 3).map((n) => n.slug)).toEqual([
+      'seed-0',
+      'seed-1',
+      'seed-2',
+    ]);
+    expect(selectSeedsNeedingAttention(input, -3)).toEqual([]);
+    expect(selectSeedsNeedingAttention(input, Number.NaN)).toEqual([]);
+    expect(selectSeedsNeedingAttention(input, 2.9)).toHaveLength(2);
+  });
+
+  it('the default limit constant is 5 (D5 literal) and caps the shipped list', () => {
+    expect(SEEDS_ATTENTION_LIMIT).toBe(5);
+    expect(RECENT_NOTES_LIMIT).toBe(5); // the F2 literal is untouched
+    const seven = Array.from({ length: 7 }, (_, i) =>
+      seed(`s${i}`, `2026-05-0${i + 1}T00:00:00.000Z`),
+    );
+    expect(
+      selectSeedsNeedingAttention(seven, SEEDS_ATTENTION_LIMIT).map((n) => n.slug),
+    ).toEqual(['s0', 's1', 's2', 's3', 's4']);
+  });
+
+  it('returns [] for empty input', () => {
+    expect(selectSeedsNeedingAttention([], SEEDS_ATTENTION_LIMIT)).toEqual([]);
+  });
+
+  it('does not mutate the input array', () => {
+    const input = [
+      seed('b', '2026-06-01T00:00:00.000Z', 'seed'),
+      seed('a', '2026-01-01T00:00:00.000Z', 'growing'),
+    ];
+    const snapshot = [...input];
+
+    selectSeedsNeedingAttention(input, 1);
+
+    expect(input).toEqual(snapshot);
+  });
+
+  it('leaves selectRecentNotes behavior untouched (F2 regression)', () => {
+    const input = [
+      seed('older', '2026-01-02T08:00:00.000Z', 'seed'),
+      seed('newest', '2026-03-05T12:00:00.000Z', 'archived'),
+    ];
+    // Recent notes ignore status entirely and still order DESC.
+    expect(selectRecentNotes(input, 5).map((n) => n.slug)).toEqual(['newest', 'older']);
   });
 });

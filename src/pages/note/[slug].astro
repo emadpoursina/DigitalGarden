@@ -14,6 +14,7 @@ import { renderNoteBody } from '../../lib/render';
 import {
   assertValidSlug,
   NoteNotFoundError,
+  NOTE_STATUSES,
   readNoteWithSnapshot,
   refreshVaultIndex,
   resolveWikiLink,
@@ -126,8 +127,28 @@ const pageDataJson = JSON.stringify({
     <header class="note-header">
       <h1>{note.title}</h1>
       <p class="note-meta">
-        <span class={`status-badge status-${note.status}`}>{note.status}</span>
+        <!-- Q3: the badge links to this state's list; its classes are unchanged (D6). -->
+        <a class="badge-link" href={`/status/${note.status}`}>
+          <span class={`status-badge status-${note.status}`}>{note.status}</span>
+        </a>
         <span class="note-updated">Updated {note.updated}</span>
+        <!-- F4 T007: server-rendered status control — the four enum options,
+             current preselected; posts on change through the same contract
+             as a body save (Q2). -->
+        <span class="status-control">
+          <label for="note-status-select">Status</label>
+          <select
+            id="note-status-select"
+            data-current-status={note.status}
+            aria-describedby="note-status"
+          >
+            {NOTE_STATUSES.map((option) => (
+              <option value={option} selected={option === note.status}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </span>
       </p>
       <div class="note-actions">
         <button type="button" id="note-edit-open">Edit</button>
@@ -151,15 +172,20 @@ const pageDataJson = JSON.stringify({
             <button type="button" id="note-save">Save</button>
             <button type="button" id="note-cancel">Cancel</button>
           </div>
-          <!-- 409 state: nothing is written or discarded until a choice is made. -->
-          <div id="note-conflict" role="alert" hidden>
-            <p id="note-conflict-message">This note changed on disk while you were editing.</p>
-            <div class="edit-actions">
-              <button type="button" id="conflict-reload">Reload from disk</button>
-              <button type="button" id="conflict-overwrite">Overwrite</button>
-            </div>
-          </div>
         </section>
+
+        <!-- 409 state: nothing is written or discarded until a choice is made.
+             It sits OUTSIDE `#note-edit` on purpose (F4 T007): a status save
+             conflicts with the editor CLOSED, and one shared box must be
+             visible for BOTH flows (plan R3 / contract §2) — hiding it inside
+             the edit section made a status conflict silently invisible. -->
+        <div id="note-conflict" role="alert" hidden>
+          <p id="note-conflict-message">This note changed on disk while you were editing.</p>
+          <div class="edit-actions">
+            <button type="button" id="conflict-reload">Reload from disk</button>
+            <button type="button" id="conflict-overwrite">Overwrite</button>
+          </div>
+        </div>
       </div>
 
       <!-- T006: one row per inbound link occurrence (FR-004). -->
@@ -214,6 +240,59 @@ const pageDataJson = JSON.stringify({
     font-family: var(--font-ui);
     font-size: 0.85rem;
     opacity: 0.85;
+  }
+
+  /* ---- F4 T007: badge link (Q3) + status control (Q2/D6) ---- */
+
+  .badge-link {
+    display: inline-block;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .badge-link:hover .status-badge {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .badge-link:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+    border-radius: 999px;
+  }
+
+  .status-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-left: auto;
+  }
+
+  .status-control label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.8;
+  }
+
+  #note-status-select {
+    font-family: var(--font-ui);
+    font-size: 0.85rem;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    padding: 0.15rem 0.3rem;
+  }
+
+  #note-status-select:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  #note-status-select:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 1px;
   }
 
   .status-badge {
@@ -546,12 +625,16 @@ const pageDataJson = JSON.stringify({
     pendingCreateDecision,
     saveDecision,
     savePayload,
+    statusControlEnabled,
+    statusDecision,
+    statusSavePayload,
     submitPendingCreate,
     submitSave,
     type EditState,
     type NoteCandidate,
     type NoteRequestInit,
     type PendingPorts,
+    type SavePayload,
     type SaveResponsePorts,
   } from '../../lib/wikilink-client';
 
@@ -569,6 +652,7 @@ const pageDataJson = JSON.stringify({
   const conflictMsgEl = document.getElementById('note-conflict-message') as HTMLParagraphElement;
   const conflictReloadBtn = document.getElementById('conflict-reload') as HTMLButtonElement;
   const conflictOverwriteBtn = document.getElementById('conflict-overwrite') as HTMLButtonElement;
+  const statusSelect = document.getElementById('note-status-select') as HTMLSelectElement;
   const popupEl = document.getElementById('wikilink-popup') as HTMLElement;
   const pageDataEl = document.getElementById('f3-page-data') as HTMLScriptElement;
 
@@ -587,6 +671,18 @@ const pageDataJson = JSON.stringify({
    * ------------------------------------------------------------------ */
   let editState: EditState = leaveEdit();
   let saveInFlight = false;
+  let statusInFlight = false;
+  /**
+   * The LAST payload this page sent — body save or status save. The single
+   * Overwrite control re-POSTs it with `force: true`, so one conflict box
+   * and one retry semantics cover both flows (plan R3 / contract §2).
+   */
+  let pendingPayload: SavePayload | null = null;
+  /**
+   * The status the SERVER rendered. A 200 reloads the page (so this never
+   * goes stale in practice), and a 400/500 reverts the select to it.
+   */
+  const currentStatus = statusSelect.dataset.currentStatus ?? statusSelect.value;
   let pendingInFlight = false;
   let activeMarker: HTMLAnchorElement | null = null;
 
@@ -615,6 +711,9 @@ const pageDataJson = JSON.stringify({
       saveBtn.disabled = !enabled;
       cancelBtn.disabled = !enabled;
       editOpenBtn.disabled = !enabled;
+      // The status select rides the same controls gate (Q2): disabled while
+      // any save is in flight …
+      refreshSelectEnabled();
     },
     showConflict: (disk) => {
       conflictEl.hidden = false;
@@ -645,12 +744,21 @@ const pageDataJson = JSON.stringify({
   /* ------------------------------------------------------------------ *
    * T010 — edit mode, save, Esc, conflict choices
    * ------------------------------------------------------------------ */
+  /** The disable matrix in one place (Q2): edit mode OR any in-flight save. */
+  function refreshSelectEnabled(): void {
+    statusSelect.disabled = !statusControlEnabled({
+      editOpen: editState.editing,
+      saveInFlight: saveInFlight || statusInFlight,
+    });
+  }
+
   function openEdit(): void {
     editState = enterEdit(textarea.value); // textarea ships prefilled (SSR)
     noteBody.hidden = true;
     editRegion.hidden = false;
     statusEl.textContent = '';
     conflictEl.hidden = true;
+    refreshSelectEnabled(); // …and the select locks for the whole edit (Q2)
     textarea.focus();
   }
 
@@ -661,23 +769,54 @@ const pageDataJson = JSON.stringify({
     statusEl.textContent = '';
     conflictEl.hidden = true;
     closePopup();
+    refreshSelectEnabled();
     editOpenBtn.focus();
   }
 
-  async function runSave(force: boolean): Promise<void> {
-    if (saveDecision({ inFlight: saveInFlight, body: textarea.value }) === 'ignore') return;
-    saveInFlight = true;
+  /**
+   * THE shared request path (plan R3 / contract §2): body saves and status
+   * saves both go through `fetch('/api/note')` + `handleSaveResponse`, both
+   * record their payload for the Overwrite retry, and both clear any open
+   * conflict box FIRST — a new attempt must never fight a stale one.
+   */
+  async function send(payload: SavePayload, track: (busy: boolean) => void): Promise<void> {
+    track(true);
+    pendingPayload = payload;
     savePorts.setControlsEnabled(false);
     statusEl.textContent = '';
+    conflictEl.hidden = true;
     try {
-      await submitSave(savePayload(slug, textarea.value, baseHash, force), savePorts);
+      const outcome = await submitSave(payload, savePorts);
+      if (outcome.kind === 'failed') {
+        // 400/500 (message already written inline): put the select back to
+        // the status that is actually on disk.
+        statusSelect.value = currentStatus;
+      }
     } catch {
       // Transport failure: loud inline error, never a silent "saved".
       statusEl.textContent = 'The note could not be saved.';
+      statusSelect.value = currentStatus;
       savePorts.setControlsEnabled(true);
     } finally {
-      saveInFlight = false;
+      track(false);
+      refreshSelectEnabled();
     }
+  }
+
+  async function runBodySave(force: boolean): Promise<void> {
+    if (saveDecision({ inFlight: saveInFlight || statusInFlight, body: textarea.value }) === 'ignore') {
+      return;
+    }
+    await send(savePayload(slug, textarea.value, baseHash, force), (busy) => {
+      saveInFlight = busy;
+    });
+  }
+
+  async function runStatusSave(value: string, force = false): Promise<void> {
+    // statusSavePayload carries NO body — disk truth by construction (Q1).
+    await send(statusSavePayload(slug, value, baseHash, force), (busy) => {
+      statusInFlight = busy;
+    });
   }
 
   editOpenBtn.addEventListener('click', openEdit);
@@ -687,7 +826,22 @@ const pageDataJson = JSON.stringify({
     refreshPopup();
   });
 
-  saveBtn.addEventListener('click', () => void runSave(false));
+  saveBtn.addEventListener('click', () => void runBodySave(false));
+
+  // Q2: post ON CHANGE; an unchanged selection (or one made while a save is
+  // in flight) posts nothing and leaves the select showing the disk truth.
+  statusSelect.addEventListener('change', () => {
+    const value = statusSelect.value;
+    const decision = statusDecision({
+      inFlight: saveInFlight || statusInFlight,
+      changed: value !== currentStatus,
+    });
+    if (decision === 'ignore') {
+      statusSelect.value = currentStatus;
+      return;
+    }
+    void runStatusSave(value);
+  });
 
   cancelBtn.addEventListener('click', () => {
     const decision = escapeDecision({
@@ -707,7 +861,16 @@ const pageDataJson = JSON.stringify({
   });
 
   conflictOverwriteBtn.addEventListener('click', () => {
-    if (conflictDecision({ choice: 'overwrite' }) === 'overwrite') void runSave(true);
+    if (conflictDecision({ choice: 'overwrite' }) !== 'overwrite') return;
+    const payload = pendingPayload;
+    if (!payload) return; // nothing was sent yet — nothing to force
+    // ONE retry semantics for BOTH flows: re-POST exactly the payload that
+    // conflicted, with `force: true` (the only source of force, FR-007).
+    const wasStatusSave = payload.body === undefined && payload.status !== undefined;
+    void send({ ...payload, force: true }, (busy) => {
+      if (wasStatusSave) statusInFlight = busy;
+      else saveInFlight = busy;
+    });
   });
 
   document.addEventListener('keydown', (event) => {

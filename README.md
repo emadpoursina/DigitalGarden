@@ -98,14 +98,16 @@ index is recomputed per view **and** on every save: `POST /api/note` calls
 no manual rebuild step anywhere.
 
 **Editing & saving.** `Edit` swaps in a raw-Markdown textarea prefilled
-with the source — body only; title/status/tags editing belongs to F4/F8.
+with the source — body only (status has its own control since F4, below;
+title/tags editing belongs to F8).
 `Save` POSTs `{slug, body, baseHash, force?}` and reloads read mode from
 disk; `Esc`/`Cancel` confirm first when the buffer is dirty, and leave it
 alone when it is clean. If the file changed on disk while you were editing,
 the save answers `409 external-edit-conflict` and the page shows two
 keyboard-reachable choices — **Reload from disk** (confirms first, discards
 your buffer) or **Overwrite** (`force: true`, the only source of `force`) —
-and neither side is touched until you pick one.
+and neither side is touched until you pick one. F4 routes the status
+control through this **same** conflict box and the same two choices.
 
 **Autocomplete & pending links.** Typing `[[` in the editor opens a popup
 of existing titles, filtered case-insensitively as you type (row 1 is the
@@ -117,17 +119,67 @@ exactly one note through `POST /api/capture` (title = the target, `seed` /
 navigates to the existing note instead of overwriting, and a failure shows
 an inline error and changes nothing.
 
-`POST /api/note` response contract: `200 {slug, updated, backlinks}`,
-`409 {error:'external-edit-conflict', disk:{updated, hash}}`,
-`404 {error:'note-not-found', slug}`, `400 {error:'invalid-payload'}` (bad
-or incomplete payload, nothing written), `500 {error:'save-failed',
-message}`, `405` on GET.
+`POST /api/note` response contract: `200 {slug, status, updated, backlinks}`
+(`status` added by F4 — see below), `409 {error:'external-edit-conflict',
+disk:{updated, hash}}`, `404 {error:'note-not-found', slug}`,
+`400 {error:'invalid-payload'}` (bad or incomplete payload, nothing written),
+`500 {error:'save-failed', message}`, `405` on GET.
 
 > **Known gap until F9:** edit saves write the file but create **no git
 > commit** — commit-on-save (with its settings toggle and push) is F9's
 > acceptance criterion. Quick captures still commit
 > (`docs(note): capture <slug>`), so between F3 and F9 edits are on disk
 > but missing from git history. This is deliberate, not an oversight.
+
+## Note lifecycle states (F4)
+
+Every note carries one of four lifecycle states — `seed`, `growing`,
+`evergreen`, `archived` (`NOTE_STATUSES` in `src/lib/notes.ts`). A note
+created without a status is a **`seed`** (F1 default, now regression-locked
+by tests), and a file with an out-of-enum status is rejected as corrupt
+rather than silently accepted. Nothing here adds a persistence layer:
+status stays an ordinary frontmatter key in the same Markdown file.
+
+**Changing status from the note view.** `/note/<slug>` has a `Status`
+`<select>` beside the badge (the badge itself is unchanged — it now links to
+`/status/<state>`). It **posts on change** through the very same
+`POST /api/note` contract as a body save: same snapshot check, same single
+`409` conflict box (Overwrite retries the payload with `force: true`,
+Reload takes the disk copy), same inline errors. The select is **disabled
+while edit mode is open and while any save is in flight** (so a status post
+can never stale the body editor's snapshot), re-selection of the value
+already on disk posts nothing, a `400`/`500` reverts the select to the
+value on disk, and a `200` reloads the view so the badge, the state lists
+and the dashboard all re-render from disk.
+
+**Extended `POST /api/note`.** The endpoint accepts
+`{slug, baseHash, force?, body?, status?}` with **at least one of
+`body`/`status`**; an omitted field keeps its on-disk value, so a
+status-only save can never clobber a body edited elsewhere (and vice
+versa), and `status` outside the enum is a `400 invalid-payload` decided
+before anything touches the vault. The `200` body is now
+`{slug, status, updated, backlinks}`. Validation order: JSON → object →
+`slug` → `baseHash` → presence rule → field types → `status` ∈ enum →
+slug shape → vault ops.
+
+**`/status/<state>`.** A shared browse route: `/status/seed`,
+`/status/growing`, `/status/evergreen` and `/status/archived` list exactly
+the notes in that state, newest-updated first, with a param-driven heading
+and empty-state sentence (each state words its own copy). An unknown state
+is a friendly `404` (no stack trace, link back to the dashboard). The page
+reads notes one at a time and skips a malformed file, so one broken note
+never takes a list view down — the direct note view still fails loudly on
+the same file, which is the shipped F3 asymmetry, not a regression.
+
+**Dashboard.** `Seeds needing attention` sits under Recent notes: the
+`seed` notes least-recently-updated first, capped at five
+(`SEEDS_ATTENTION_LIMIT`), heading linked to `/status/seed`. All dashboard
+row titles link to `/note/<slug>` and all status badges link to
+`/status/<state>`; the Recent-notes badges link the same way.
+
+**Commits.** Status saves write the file and create **no git commit** —
+same rule as F3's body saves: commit-on-save is F9's acceptance criterion.
+F2 quick captures still commit (`docs(note): capture <slug>`).
 
 ## Vault location (`GARDEN_VAULT_DIR`)
 

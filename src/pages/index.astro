@@ -4,17 +4,25 @@
 //       (FR-001, plan §4 placement decision — a header row, not the old
 //       <nav> list).
 // T007: the page's ONE key binding — `c` → /new (FR-001/FR-002).
-// T013: recent notes, most-recently-updated first, rows are NON-links in F2
-//       (`/note/<slug>` ships with F8, plan §4).
+// T013: recent notes, most-recently-updated first (rows became /note links
+//       when F3 shipped the reading view; F4 Q3/Q4 link every row + badge).
 // T017: degraded-history banner driven by `gitWarningDecision`.
+// F4 T011: "Seeds needing attention" — the weekly-tending surface (D5) —
+//       plus Q3/Q4 links: row titles → /note/<slug>, badges → /status/<state>.
 import Base from '../layouts/Base.astro';
-import { RECENT_NOTES_LIMIT, selectRecentNotes } from '../lib/dashboard';
+import {
+  RECENT_NOTES_LIMIT,
+  SEEDS_ATTENTION_LIMIT,
+  selectRecentNotes,
+  selectSeedsNeedingAttention,
+} from '../lib/dashboard';
 import { listNoteSlugs, readNote, type Note } from '../lib/notes';
 import { resolveVaultDir } from '../lib/vault';
 
 // Server-side render on every request (output:'server'), so a capture saved
 // through POST /api/capture is in this list on the next page load — no
-// client-side list code, no manual refresh (FR-005, US2.2).
+// client-side list code, no manual refresh (FR-005, US2.2). The same is
+// true of a status change: every list below re-reads disk per request (R7).
 const vaultDir = resolveVaultDir();
 const notes: Note[] = [];
 for (const slug of listNoteSlugs(vaultDir)) {
@@ -30,6 +38,13 @@ const rows = selectRecentNotes(notes, RECENT_NOTES_LIMIT).map((note) => ({
   slug: note.slug,
   title: note.title,
   status: note.status,
+  updated: note.updated,
+}));
+
+// F4/D5: seeds only, least-recently-updated first, capped at 5.
+const seedRows = selectSeedsNeedingAttention(notes, SEEDS_ATTENTION_LIMIT).map((note) => ({
+  slug: note.slug,
+  title: note.title,
   updated: note.updated,
 }));
 ---
@@ -61,14 +76,18 @@ const rows = selectRecentNotes(notes, RECENT_NOTES_LIMIT).map((note) => ({
           </thead>
           <tbody>
             {rows.map((row) => (
-              // Non-links on purpose: /note/<slug> 404s until F8 (plan §4).
+              // Q4: rows link to their note; Q3: badges link to its state list.
               <tr>
-                <td class="row-title">{row.title}</td>
+                <td class="row-title">
+                  <a href={`/note/${row.slug}`}>{row.title}</a>
+                </td>
                 <td class="row-slug">{row.slug}</td>
                 <td>
-                  <span class="badge" data-status={row.status}>
-                    {row.status}
-                  </span>
+                  <a class="badge-link" href={`/status/${row.status}`}>
+                    <span class="badge" data-status={row.status}>
+                      {row.status}
+                    </span>
+                  </a>
                 </td>
                 <td>
                   <time datetime={row.updated}>{row.updated}</time>
@@ -79,6 +98,45 @@ const rows = selectRecentNotes(notes, RECENT_NOTES_LIMIT).map((note) => ({
         </table>
       ) : (
         <p class="empty">No notes yet — use Capture to plant the first one.</p>
+      )
+    }
+  </section>
+
+  <!-- F4 T011/D5: the weekly-tending surface — seeds, least recently updated
+       first, capped at SEEDS_ATTENTION_LIMIT; heading links to the seed list. -->
+  <section aria-labelledby="seeds-heading">
+    <h2 id="seeds-heading">
+      <a href="/status/seed">Seeds needing attention</a>
+    </h2>
+
+    {
+      seedRows.length > 0 ? (
+        <table class="recent-notes seeds">
+          <thead>
+            <tr>
+              <th scope="col">Title</th>
+              <th scope="col">Slug</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {seedRows.map((row) => (
+              <tr>
+                <td class="row-title">
+                  <a href={`/note/${row.slug}`}>{row.title}</a>
+                </td>
+                <td class="row-slug">{row.slug}</td>
+                <td>
+                  <time datetime={row.updated}>{row.updated}</time>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p class="empty">
+          No seeds need attention — every seed has been tended recently.
+        </p>
       )
     }
   </section>
@@ -260,5 +318,45 @@ const rows = selectRecentNotes(notes, RECENT_NOTES_LIMIT).map((note) => ({
   .empty {
     font-family: var(--font-ui);
     opacity: 0.75;
+  }
+
+  /* ---- F4 T011: seeds section + linked rows/badges (Q3/Q4) ---- */
+
+  section + section {
+    margin-top: calc(var(--space) * 1.5);
+  }
+
+  /* The badge keeps its exact F2 look; the link around it adds only
+     hit-target + focus affordances, no new badge styling system. */
+  .badge-link {
+    display: inline-block;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .badge-link:hover .badge {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .badge-link:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+    border-radius: 999px;
+  }
+
+  #seeds-heading a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  #seeds-heading a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  #seeds-heading a:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
   }
 </style>

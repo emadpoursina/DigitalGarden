@@ -49,3 +49,42 @@ export function selectRecentNotes<T extends RecentNoteLike>(
     })
     .slice(0, cap);
 }
+
+/* ================================================================== *
+ * F4 T010 — "Seeds needing attention" (D5, plan contract §5, US3)
+ * The weekly-tending surface: the seeds that have gone longest without
+ * being tended, oldest first, capped at the shipped limit.
+ * ================================================================== */
+
+/** What the attention list orders on — the recent shape plus the lifecycle. */
+export interface SeedAttentionNote extends RecentNoteLike {
+  /** One of `NOTE_STATUSES`; only `'seed'` rows qualify. */
+  status: string;
+}
+
+/** Rows the seeds section shows (D5 literal — binding for future consumers). */
+export const SEEDS_ATTENTION_LIMIT = 5;
+
+/**
+ * Return the `limit` SEEDS that have gone least-recently-updated first
+ * (ascending — the oldest seed "needs attention" most), capped at `limit`.
+ *
+ * Filter is exact `status === 'seed'` (growing/evergreen/archived never
+ * qualify); ties on `updated` break by `slug` ASC for a deterministic
+ * render; the limit is clamped with the same discipline as
+ * {@link selectRecentNotes}; the input array is never mutated.
+ */
+export function selectSeedsNeedingAttention<T extends SeedAttentionNote>(
+  notes: readonly T[],
+  limit: number,
+): T[] {
+  const cap = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 0;
+
+  return notes
+    .filter((note) => note.status === 'seed')
+    .sort((a, b) => {
+      if (a.updated !== b.updated) return a.updated < b.updated ? -1 : 1;
+      return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+    })
+    .slice(0, cap);
+}

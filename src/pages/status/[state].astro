@@ -1,0 +1,211 @@
+---
+// F4 T009 — `/status/[state]` shared lifecycle browse view (spec US2,
+// plan R4 + Interface Contract §3, D4).
+//
+// SHARED PATTERN: F6's `/tags/[tag]` reuses this shape — param validated
+// against the enum first (unknown → friendly 404, never a stack trace),
+// then a TOLERANT read (one file at a time in try/catch, the broken file is
+// skipped instead of 500-ing the view — `refreshVaultIndex` throws on the
+// first corrupt note, so it is deliberately NOT used here), then the pure
+// `selectByStatus` selector + param-driven copy from `src/lib/status-list.ts`.
+// Page-scoped styles only: `Base.astro` and `global.css` stay untouched.
+import Base from '../../layouts/Base.astro';
+import { listNoteSlugs, NOTE_STATUSES, readNote, type Note } from '../../lib/notes';
+import { statusEmptyText, statusHeading, selectByStatus } from '../../lib/status-list';
+import { resolveVaultDir } from '../../lib/vault';
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Friendly 404: same pattern as `note/[slug].astro` — no stack, dashboard link. */
+function notFoundResponse(state: string): Response {
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Unknown status — Digital Garden</title>
+  </head>
+  <body>
+    <main>
+      <h1>Unknown status</h1>
+      <p>There is no lifecycle state at <code>/status/${escapeHtml(state)}</code>.</p>
+      <p><a href="/">Back to the dashboard</a></p>
+    </main>
+  </body>
+</html>
+`;
+  return new Response(html, {
+    status: 404,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+  });
+}
+
+const state = Astro.params.state ?? '';
+
+// Validate BEFORE anything else: an unknown param is a 404, so the copy
+// helpers (which throw on unknown states) are only ever asked for a real one.
+if (!(NOTE_STATUSES as readonly string[]).includes(state)) {
+  return notFoundResponse(state);
+}
+
+// Tolerant per-note read — the dashboard's posture (plan R4): one malformed
+// file stays on disk untouched and is simply not a row, never a 500.
+const vaultDir = resolveVaultDir();
+const notes: Note[] = [];
+for (const slug of listNoteSlugs(vaultDir)) {
+  try {
+    notes.push(readNote(vaultDir, slug));
+  } catch {
+    // skipped on purpose — see above
+  }
+}
+
+const rows = selectByStatus(notes, state);
+const heading = statusHeading(state);
+const emptyText = statusEmptyText(state);
+---
+
+<Base>
+  <header class="status-header">
+    <h1 id="status-heading">{heading}</h1>
+    <a href="/">Dashboard</a>
+  </header>
+
+  <section aria-labelledby="status-heading">
+    {
+      rows.length > 0 ? (
+        <table class="status-list">
+          <thead>
+            <tr>
+              <th scope="col">Title</th>
+              <th scope="col">Slug</th>
+              <th scope="col">Status</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr>
+                <td class="row-title">
+                  <a href={`/note/${row.slug}`}>{row.title}</a>
+                </td>
+                <td class="row-slug">{row.slug}</td>
+                <td>
+                  <span class="badge" data-status={row.status}>
+                    {row.status}
+                  </span>
+                </td>
+                <td>
+                  <time datetime={row.updated}>{row.updated}</time>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p class="empty">{emptyText}</p>
+      )
+    }
+  </section>
+</Base>
+
+<style>
+  /* Widened to the list width like the note view — page-scoped, so no other
+     route changes. */
+  :global(main) {
+    max-width: 64rem;
+  }
+
+  .status-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space);
+    margin-bottom: calc(var(--space) * 1.5);
+  }
+
+  .status-header h1 {
+    font-family: var(--font-ui);
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .status-header a {
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+  }
+
+  /* Same rules as the dashboard's badge CSS (no new styling system). */
+  .status-list {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+  }
+
+  .status-list th,
+  .status-list td {
+    text-align: left;
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+    vertical-align: top;
+  }
+
+  .status-list th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+
+  .row-title {
+    font-weight: 600;
+  }
+
+  .row-slug,
+  .status-list time {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    opacity: 0.8;
+    white-space: nowrap;
+  }
+
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+  }
+
+  .badge[data-status='seed'] {
+    color: #8a6d1f;
+  }
+
+  .badge[data-status='growing'] {
+    color: #2f6b3a;
+  }
+
+  .badge[data-status='evergreen'] {
+    color: #1f5d8a;
+  }
+
+  .badge[data-status='archived'] {
+    opacity: 0.65;
+  }
+
+  .empty {
+    font-family: var(--font-ui);
+    opacity: 0.75;
+  }
+</style>

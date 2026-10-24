@@ -29,6 +29,9 @@ import {
   saveDecision,
   saveErrorMessage,
   savePayload,
+  statusControlEnabled,
+  statusDecision,
+  statusSavePayload,
   submitPendingCreate,
   submitSave,
   type NoteCandidate,
@@ -533,5 +536,52 @@ describe('T013: handlePendingResponse', () => {
 
     expect(p.fetch).toHaveBeenCalledTimes(1);
     expect(calls).toEqual(['/note/future-idea']);
+  });
+});
+
+/* ================================================================== *
+ * F4 — status-control decisions (plan R3/R6, Q2)
+ * ================================================================== */
+
+describe('F4 statusDecision (post-on-change truth table)', () => {
+  it('admits a changed selection only while nothing is in flight', () => {
+    expect(statusDecision({ inFlight: false, changed: true })).toBe('save');
+    expect(statusDecision({ inFlight: true, changed: true })).toBe('ignore');
+    expect(statusDecision({ inFlight: false, changed: false })).toBe('ignore');
+    expect(statusDecision({ inFlight: true, changed: false })).toBe('ignore');
+  });
+});
+
+describe('F4 statusSavePayload (contract §1 — no body key)', () => {
+  it('carries slug + status + baseHash and NO body (disk truth by construction)', () => {
+    const payload = statusSavePayload('alpha', 'growing', 'hash-1');
+    expect(payload).toEqual({ slug: 'alpha', status: 'growing', baseHash: 'hash-1' });
+    expect(payload).not.toHaveProperty('body');
+    expect(payload).not.toHaveProperty('force'); // default false stays off the wire
+  });
+
+  it('adds force only when the user explicitly chose Overwrite', () => {
+    expect(statusSavePayload('alpha', 'archived', 'hash-1', true).force).toBe(true);
+    expect(statusSavePayload('alpha', 'archived', 'hash-1', false)).toEqual({
+      slug: 'alpha',
+      status: 'archived',
+      baseHash: 'hash-1',
+    });
+  });
+
+  it('F3 regression: savePayload still emits a valid body-only payload', () => {
+    const payload = savePayload('alpha', 'body text', 'hash-2');
+    expect(payload).toEqual({ slug: 'alpha', body: 'body text', baseHash: 'hash-2', force: false });
+    expect(payload).not.toHaveProperty('status'); // a body save never flips status
+    expect(savePayload('alpha', 'body text', 'hash-2', true).force).toBe(true);
+  });
+});
+
+describe('F4 statusControlEnabled (disable matrix, Q2)', () => {
+  it('is true only while edit mode is closed and no save is in flight', () => {
+    expect(statusControlEnabled({ editOpen: false, saveInFlight: false })).toBe(true);
+    expect(statusControlEnabled({ editOpen: true, saveInFlight: false })).toBe(false);
+    expect(statusControlEnabled({ editOpen: false, saveInFlight: true })).toBe(false);
+    expect(statusControlEnabled({ editOpen: true, saveInFlight: true })).toBe(false);
   });
 });
