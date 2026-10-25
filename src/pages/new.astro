@@ -192,6 +192,12 @@ import Base from '../layouts/Base.astro';
     type CaptureRequestInit,
     type CaptureResponsePorts,
   } from '../lib/capture-client';
+  // F5 T007 (R3/Q2): Ctrl/⌘-K → /search from the capture view. The capture
+  // page keeps its own `c` / Ctrl+Enter / Esc discipline untouched — this is
+  // modifier-only (D3), so it can never collide with them.
+  import { wireSearchShortcut } from '../lib/search-shortcut';
+
+  wireSearchShortcut((url) => location.assign(url));
 
   /* ---- elements ---- */
   const form = document.getElementById('capture-form') as HTMLFormElement;

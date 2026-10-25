@@ -151,6 +151,11 @@ const seedRows = selectSeedsNeedingAttention(notes, SEEDS_ATTENTION_LIMIT).map((
     gitWarningDecision,
     shouldOpenCapture,
   } from '../lib/capture-client';
+  // F5 T007 (R3/Q2): the dashboard's SECOND binding — Ctrl/⌘-K → /search.
+  // Modifier-only, so a bare `c`/`k` in a field still just types (D3).
+  import { wireSearchShortcut } from '../lib/search-shortcut';
+
+  wireSearchShortcut((url) => location.assign(url));
 
   // T007 — the dashboard's ONE key binding (FR-001/FR-002, D4, plan §4).
   // Nothing else on this page listens for keys: `c` with focus outside a

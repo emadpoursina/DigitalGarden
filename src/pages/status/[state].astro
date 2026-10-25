@@ -115,6 +115,15 @@ const emptyText = statusEmptyText(state);
   </section>
 </Base>
 
+<script>
+  // F5 T007 (R3/Q2): this page had no client script of its own — F5 adds the
+  // one binding it needs, the shared Ctrl/⌘-K → /search (modifier-only, so
+  // nothing else on the page can be shadowed).
+  import { wireSearchShortcut } from '../../lib/search-shortcut';
+
+  wireSearchShortcut((url) => location.assign(url));
+</script>
+
 <style>
   /* Widened to the list width like the note view — page-scoped, so no other
      route changes. */

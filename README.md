@@ -181,6 +181,53 @@ row titles link to `/note/<slug>` and all status badges link to
 same rule as F3's body saves: commit-on-save is F9's acceptance criterion.
 F2 quick captures still commit (`docs(note): capture <slug>`).
 
+## Full-text search (F5)
+
+**`/search`.** A server-rendered view on the Base layout: the server reads
+the vault one note at a time (the same tolerant loop as the dashboard — a
+malformed file is skipped, it never 500s the page), embeds the resulting
+`SearchDoc[]` as a JSON island, and the browser builds a **MiniSearch**
+index from it (`src/lib/search.ts`). Nothing is written to disk and
+**search never creates a commit**: it is a read-only surface, and it adds no
+endpoint and no save hook of its own.
+
+**Index and rows.** Indexed fields are `title` (boosted ×2), `body` and
+`tags` (tag arrays are joined with spaces so tag terms tokenize), with
+`slug` as identity and `title`/`slug`/`tags`/`status` stored for display.
+Each row shows the title link (`/note/<slug>`), the slug, the tags, an
+escaped ~160-character snippet with a `<mark>` around the first body hit
+(title/tag-only hits fall back to the leading excerpt, unmarked), and an
+`archived` badge when the archive filter surfaced it. **Archived notes stay
+in the index** and are hidden until `Include archived` is ticked;
+`visibility` is carried but never filtered on localhost.
+
+**Shortcut.** `Ctrl-K` / `⌘-K` opens `/search` from every view — dashboard,
+capture, note, status list and search itself (on `/search` it just refocuses
+the input). The predicate lives in `src/lib/search-shortcut.ts` and each
+page's own `<script>` wires it, so `Base.astro` stays untouched and a bare
+`k`/`K` typed anywhere still only types (modifier-only rule, PRD §10).
+
+**Freshness.** The next `/search` load always reflects the disk state —
+edits, deletes and status changes ride the existing generic
+`refreshVaultIndex` hook, which F5 deliberately does **not fork** (F6
+consumes the same hook). For the open tab there is a second, in-memory
+layer: when the tab becomes visible again the page re-reads its own
+document (same-origin GET of `/search`, no new endpoint) and patches the
+live index with `upsertDoc`/`removeDoc` + `replace`/`discard`, so results
+update without a reload and agree with a fresh load.
+
+**Keyboard.** ArrowUp/Down and Enter are bound by **one listener on the
+results panel** (`role="listbox"`), routed through
+`resultsKeyCommand({key, panelFocused})`; focus in the input or anywhere
+else keeps fully native key behavior — there is no document-global arrow or
+Enter binding anywhere in the feature path.
+
+**Performance (Q4 protocol).** On a deterministic seeded 1,000-note vault
+(1,004 healthy docs + 1 corrupt file skipped), scripted Chromium measured
+keystroke → rendered results over 5 queries (title-hit, body-hit, tag-hit,
+multi-word, zero-match) × cold load + 3 warm re-types: **p95 = 107 ms**
+(min 101 / median 102 / max 108) against a 300 ms budget.
+
 ## Vault location (`GARDEN_VAULT_DIR`)
 
 `src/lib/vault.ts` → `resolveVaultDir()` is the only place in the app that

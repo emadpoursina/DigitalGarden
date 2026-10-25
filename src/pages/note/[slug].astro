@@ -637,6 +637,10 @@ const pageDataJson = JSON.stringify({
     type SavePayload,
     type SaveResponsePorts,
   } from '../../lib/wikilink-client';
+  // F5 T007 (R3/Q2): Ctrl/⌘-K → /search from the reading/editing view.
+  import { wireSearchShortcut } from '../../lib/search-shortcut';
+
+  wireSearchShortcut((url) => location.assign(url));
 
   /* ------------------------------------------------------------------ *
    * Elements
