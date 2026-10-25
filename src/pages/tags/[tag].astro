@@ -1,0 +1,184 @@
+---
+// F6 T020 — `/tags/[tag]` notes for one tag (spec US2, plan contract §3, R2/R3/R4).
+//
+// Deliberate mirror of `/status/[state]`: same tolerant per-note read (a
+// malformed file is skipped, never a 500), same F4 row shape, same
+// page-scoped `.badge[data-status]` copy — but NO 404 branch anywhere in
+// this file. An unknown tag, a malformed `%` URL and a tag dropped from
+// every note all answer 200 with the named empty state (D4), and the index
+// is rebuilt on every request (D6: no hook, no cache).
+//
+// Copy shows the RAW param (open-vocabulary honesty: `/tags/AI` says "AI"
+// while listing the `ai` members); matching folds it in `decodeTagParam`.
+import Base from '../../layouts/Base.astro';
+import { buildTagIndex, listNoteSlugs, readNote, type Note } from '../../lib/notes';
+import { decodeTagParam, getNotesForTag } from '../../lib/tags';
+import { resolveVaultDir } from '../../lib/vault';
+
+const raw = Astro.params.tag ?? '';
+
+// Spec Edge Cases + plan Risks: `tags/index.astro` OWNS `/tags/index` (D3
+// wins, a tag literally named `index` is unreachable by URL — the recorded,
+// accepted limitation). Astro 7 actually hands that path to this dynamic
+// route, so the literal `index` segment is delegated back to the index page
+// here instead of being answered as a tag list.
+if (raw === 'index') {
+  return Astro.rewrite('/tags');
+}
+
+const key = decodeTagParam(raw);
+
+const vaultDir = resolveVaultDir();
+const notes: Note[] = [];
+for (const slug of listNoteSlugs(vaultDir)) {
+  try {
+    notes.push(readNote(vaultDir, slug));
+  } catch {
+    // One malformed file stays on disk untouched and is simply not a row.
+  }
+}
+
+// Plan §3: the index documents membership for this vault (rebuilt this
+// request, like every other view); when the folded key is not one of its
+// keys no note carries the tag, so the case-folded scan below finds nothing
+// either. Rows still come from `getNotesForTag` — the index never selects.
+const index = buildTagIndex(notes);
+const rows = key in index ? getNotesForTag(notes, key) : [];
+---
+
+<Base>
+  <header class="tag-header">
+    <h1 id="tag-heading">Notes tagged “{raw}”</h1>
+    <a href="/">Dashboard</a>
+  </header>
+
+  <section aria-labelledby="tag-heading">
+    {
+      rows.length > 0 ? (
+        <table class="tag-notes">
+          <thead>
+            <tr>
+              <th scope="col">Title</th>
+              <th scope="col">Status</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr>
+                <td class="row-title">
+                  <a href={`/note/${row.slug}`}>{row.title}</a>
+                </td>
+                <td>
+                  <span class="badge" data-status={row.status}>
+                    {row.status}
+                  </span>
+                </td>
+                <td>
+                  <time datetime={row.updated}>{row.updated}</time>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p class="empty">No notes tagged “{raw}” yet.</p>
+      )
+    }
+  </section>
+</Base>
+
+<style>
+  /* Page-scoped only — `Base.astro` and `global.css` stay untouched (D7). */
+  :global(main) {
+    max-width: 64rem;
+  }
+
+  .tag-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space);
+    margin-bottom: calc(var(--space) * 1.5);
+  }
+
+  .tag-header h1 {
+    font-family: var(--font-ui);
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .tag-header a {
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+  }
+
+  /* Same rules as the status page's table (no new styling system). */
+  .tag-notes {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+  }
+
+  .tag-notes th,
+  .tag-notes td {
+    text-align: left;
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+    vertical-align: top;
+  }
+
+  .tag-notes th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+
+  .row-title {
+    font-weight: 600;
+  }
+
+  .tag-notes time {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    opacity: 0.8;
+    white-space: nowrap;
+  }
+
+  /* Page-scoped COPY of the status-page badge rules (D7: no global.css, no
+     third visual idiom). */
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+  }
+
+  .badge[data-status='seed'] {
+    color: #8a6d1f;
+  }
+
+  .badge[data-status='growing'] {
+    color: #2f6b3a;
+  }
+
+  .badge[data-status='evergreen'] {
+    color: #1f5d8a;
+  }
+
+  .badge[data-status='archived'] {
+    opacity: 0.65;
+  }
+
+  .empty {
+    font-family: var(--font-ui);
+    opacity: 0.75;
+  }
+</style>

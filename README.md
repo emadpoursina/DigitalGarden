@@ -228,6 +228,65 @@ keystroke → rendered results over 5 queries (title-hit, body-hit, tag-hit,
 multi-word, zero-match) × cold load + 3 warm re-types: **p95 = 107 ms**
 (min 101 / median 102 / max 108) against a 300 ms budget.
 
+## Tag browsing (F6)
+
+**`/tags` — the tag index.** One row per canonical tag (trimmed, lowercased —
+`AI` / `ai` / ` padded ` all merge into one row with the merged count), sorted
+in code-unit order, each row a link to that tag's list. The page reads the
+vault one note at a time (the same tolerant loop as the dashboard and status
+list: a malformed file is skipped, it never 500s the view), rebuilds the tag
+index from disk on **every request** and renders — no cache, no hook, no
+reindex step. A vault with no tags answers `200` with
+`No tags yet — add a tag to a note to grow this index.`, never a 404.
+Archived notes are counted exactly like live ones (no archive filter in v1).
+
+**`/tags/<tag>` — notes for one tag.** Matching is case-folded
+(`/tags/AI`, `/tags/Ai` and `/tags/ai` show the same list), rows are
+newest-`updated` first with `slug` ascending as the tie-break, and each row
+carries the title link (`/note/<slug>`), the status badge (page-scoped copy of
+the `.badge[data-status]` idiom) and a `<time datetime>`. The heading and the
+empty sentence name the **raw** URL segment as you asked for it (`/tags/AI`
+says "AI" while listing the `ai` members). An unknown tag — never used, or
+just removed from every note — answers `200` with
+`No notes tagged “<tag>” yet.`; there is no 404 branch in the tag path.
+
+**URL contract.** Rows are built with `tagHref` = `/tags/` + one
+`encodeURIComponent`-ed segment, and the route decodes with `decodeTagParam`
+(`decodeURIComponent`, `URIError` → raw input, then lowercase) — so `C++`,
+`a/b`, `50%`, `café` and emoji round-trip, and a decoding miss lands on the
+empty state instead of an error. Note the frame around that contract: a URL
+whose percent-escapes are *malformed* (`/tags/50%`, `/tags/%E0%A4%A`) never
+reaches the app at all — Astro's own dev middleware
+(`trailing-slash.js` → `decodeURI`) answers `500` in `astro dev`, and the node
+adapter's request guard (`standalone.js` → `decodeURI`) answers `400` in the
+built server. F6 code is never invoked for those requests, and its own
+decoding is unit-tested to never throw (`src/lib/tags.test.ts`).
+
+**Navigation.** `Base.astro` carries exactly one new landmark,
+`<nav id="site-nav" aria-label="Sections">` with
+`<a href="/tags" id="tags-entry">Tags</a>` above `<slot/>` — a native link, so
+it is Tab-reachable with a visible focus ring from every view and adds **zero**
+key handlers anywhere in F6. `Ctrl/⌘-K` is unchanged (F5's per-page shortcut).
+
+**Freshness (AC3).** Because both tag routes rebuild the index per request
+from a fresh read, a tag removed from every note is gone from `/tags` on the
+very next load and `/tags/<old>` immediately answers the empty state — no
+manual reindex, no second hook. The same rule is regression-locked in
+`src/lib/tags.test.ts` (through the real `buildTagIndex`, not a mock index).
+
+**Selection lives in `src/lib/tags.ts`** (pure, DOM-free, fs-free):
+`getAllTags`, `getNotesForTag`, `tagHref`, `decodeTagParam`. Pages do no
+inline sorting or filtering — the only page-level transform is `.map()` to
+display rows — so the ordering discipline stays unit-testable without a
+browser. `src/lib/notes.ts` and the F4/F5 surfaces are untouched.
+
+**Limitations (accepted, recorded).** A tag literally named `index` is
+delegated back to the index page at `/tags/index` (D3 wins, so that tag's list
+is unreachable by URL). The direct note view still fails loudly on a corrupt
+file — the shipped F3 asymmetry: list views skip it, `/note/<slug>` does not.
+Measured on a 1,000-note vault, both views render in ~120–270 ms (`/tags`) and
+~135–165 ms (`/tags/<tag>`) against the 500 ms budget.
+
 ## Vault location (`GARDEN_VAULT_DIR`)
 
 `src/lib/vault.ts` → `resolveVaultDir()` is the only place in the app that

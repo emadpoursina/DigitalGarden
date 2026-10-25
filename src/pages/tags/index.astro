@@ -1,0 +1,134 @@
+---
+// F6 T010 — `/tags` the tag index (spec US1, plan contract §2, R2/R4).
+//
+// Same read posture as the dashboard / status list: one tolerant pass over
+// the vault (a malformed file is skipped, never a 500) — `refreshVaultIndex`
+// throws on the first corrupt note by design, so it is deliberately NOT used
+// here. The index is rebuilt on EVERY request: no hook, no cache, which is
+// what makes AC3 (a tag dropped from every note is gone on the next load)
+// structural rather than a refresh step. Selection happens in `tags.ts`
+// only — no `.sort()`/`.filter()` inline, the single `.map()` below just
+// shapes rows for display. 200 always, empty or not.
+import Base from '../../layouts/Base.astro';
+import { buildTagIndex, listNoteSlugs, readNote, type Note } from '../../lib/notes';
+import { getAllTags, tagHref } from '../../lib/tags';
+import { resolveVaultDir } from '../../lib/vault';
+
+const vaultDir = resolveVaultDir();
+const notes: Note[] = [];
+for (const slug of listNoteSlugs(vaultDir)) {
+  try {
+    notes.push(readNote(vaultDir, slug));
+  } catch {
+    // One malformed file stays on disk untouched and is simply not a row.
+  }
+}
+
+const entries = getAllTags(buildTagIndex(notes));
+const rows = entries.map((entry) => ({
+  tag: entry.tag,
+  href: tagHref(entry.tag),
+  label: `${entry.count} ${entry.count === 1 ? 'note' : 'notes'}`,
+}));
+---
+
+<Base>
+  <header class="tags-header">
+    <h1 id="tags-heading">Tags</h1>
+    <a href="/">Dashboard</a>
+  </header>
+
+  <section aria-labelledby="tags-heading">
+    {
+      rows.length > 0 ? (
+        <table class="tag-list">
+          <thead>
+            <tr>
+              <th scope="col">Tag</th>
+              <th scope="col">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr>
+                <td class="row-tag">
+                  <a href={row.href}>{row.tag}</a>
+                </td>
+                <td class="count">{row.label}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p class="empty">No tags yet — add a tag to a note to grow this index.</p>
+      )
+    }
+  </section>
+</Base>
+
+<style>
+  /* Page-scoped only — `Base.astro` and `global.css` stay untouched (D7). */
+  :global(main) {
+    max-width: 64rem;
+  }
+
+  .tags-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space);
+    margin-bottom: calc(var(--space) * 1.5);
+  }
+
+  .tags-header h1 {
+    font-family: var(--font-ui);
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .tags-header a {
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+  }
+
+  /* Same rules as the status page's table (no new styling system). */
+  .tag-list {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+  }
+
+  .tag-list th,
+  .tag-list td {
+    text-align: left;
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+    vertical-align: top;
+  }
+
+  .tag-list th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+
+  .row-tag {
+    font-weight: 600;
+  }
+
+  .count {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    opacity: 0.8;
+    white-space: nowrap;
+  }
+
+  .empty {
+    font-family: var(--font-ui);
+    opacity: 0.75;
+  }
+</style>
