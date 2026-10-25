@@ -1,6 +1,9 @@
 ---
 // Base layout — typographic shell for reading views (PRD §10).
 // Side-by-side editor, command palette, and search arrive with F2/F5/F8.
+// F6 T030: one landmark nav above <slot/> gives every view the Tags entry
+// point (plan contract §4, D7) — a native link only: zero <script>, zero
+// <style> and zero key handlers in this file.
 import '../styles/global.css';
 ---
 
@@ -13,6 +16,7 @@ import '../styles/global.css';
   </head>
   <body>
     <main>
+      <nav id="site-nav" aria-label="Sections"><a href="/tags" id="tags-entry">Tags</a></nav>
       <slot />
     </main>
   </body>
