@@ -113,9 +113,13 @@ export function saveDecision(input: { inFlight: boolean; body: unknown }): 'save
 /** `POST /api/note` payload — plan Interface Contracts §1 (force explicit). */
 export interface SavePayload {
   slug: string;
-  body: string;
+  /** Optional since F4 (Q1): a STATUS-only save carries no body at all. */
+  body?: string;
+  /** Optional since F4 (Q1): a body-only save never flips status. */
+  status?: string;
   baseHash: string;
-  force: boolean;
+  /** Optional (contract §1 default `false`); the F4 status payload omits it unless Overwriting. */
+  force?: boolean;
 }
 
 export function savePayload(
@@ -125,6 +129,48 @@ export function savePayload(
   force = false,
 ): SavePayload {
   return { slug, body, baseHash, force: force ?? false };
+}
+
+/* ================================================================== *
+ * F4 — status control decisions (plan R3/R6, D6, spec Q2)
+ * The status <select> reuses this module so its decisions stay
+ * DOM-free-testable; the page only wires events to them.
+ * ================================================================== */
+
+/**
+ * Post-on-change guard (Q2): a selection only posts when the value REALLY
+ * changed, and never while another save (body or status) is in flight.
+ */
+export function statusDecision(input: { inFlight: boolean; changed: boolean }): 'save' | 'ignore' {
+  if (input.inFlight) return 'ignore';
+  if (!input.changed) return 'ignore';
+  return 'save';
+}
+
+/**
+ * The status-save payload (contract §1): `slug` + `status` + the load-time
+ * `baseHash`, `force` only when the user explicitly chose Overwrite.
+ *
+ * Deliberately NO `body` key — disk truth by construction: the server keeps
+ * whatever body is on disk, so a status save can never clobber an edit made
+ * elsewhere (Q1 / SC-002).
+ */
+export function statusSavePayload(
+  slug: string,
+  status: string,
+  baseHash: string,
+  force = false,
+): SavePayload {
+  return { slug, status, baseHash, ...(force ? { force: true } : {}) };
+}
+
+/**
+ * The disable matrix (Q2): the status select is live ONLY while edit mode is
+ * closed and no save is in flight — so a status post can never stale the
+ * body editor's snapshot.
+ */
+export function statusControlEnabled(input: { editOpen: boolean; saveInFlight: boolean }): boolean {
+  return !input.editOpen && !input.saveInFlight;
 }
 
 /**
@@ -163,6 +209,8 @@ export function conflictDecision(input: {
 /** `POST /api/note` response body (plan §1). */
 export interface SaveResponseBody {
   slug?: string;
+  /** Present since F4: the saved status echoed back by the endpoint. */
+  status?: string;
   updated?: string;
   backlinks?: Record<string, unknown>;
   error?: string;

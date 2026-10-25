@@ -1,0 +1,484 @@
+---
+// F5 T006/T008/T010/T011 — `/search`: server-embedded docs + in-page MiniSearch.
+//
+// Server half (T006, plan §3): a TOLERANT per-note read copied from the
+// dashboard (`index.astro:26-35`) — `refreshVaultIndex` throws on the first
+// corrupt note and would 500 this view, so it is deliberately NOT used here
+// (R4). One broken file simply contributes no docs; the rest still search.
+// `buildSearchDocs` is the existing F1 shape (D1: no new endpoint, zero
+// hunks in notes.ts).
+//
+// Client half: this page OWNS its wiring (D8) — index construction (T008),
+// the D4 session refresh (T010), and the container-scoped results keys
+// (T011, D7: the ONLY keydown listener is the one ON #search-results).
+import Base from '../layouts/Base.astro';
+import { buildSearchDocs, listNoteSlugs, readNote, type Note } from '../lib/notes';
+import { resolveVaultDir } from '../lib/vault';
+
+const vaultDir = resolveVaultDir();
+const notes: Note[] = [];
+for (const slug of listNoteSlugs(vaultDir)) {
+  try {
+    notes.push(readNote(vaultDir, slug));
+  } catch {
+    // R4 tolerance: one malformed file must not take search down; it stays
+    // on disk untouched (read-only) and is simply not a doc.
+  }
+}
+
+const docs = buildSearchDocs(notes);
+// `<` escaped so note content can never terminate the JSON island early
+// (`</script>` inside a body) — JSON.parse decodes it back to `<`.
+const docsJson = JSON.stringify(docs).replace(/</g, '\\u003c');
+---
+
+<Base>
+  <h1>Search</h1>
+
+  <input
+    id="search-input"
+    type="search"
+    aria-label="Search notes"
+    autocomplete="off"
+    placeholder="…"
+    autofocus
+  />
+
+  <label class="archive-filter" for="search-archive">
+    <input type="checkbox" id="search-archive" />
+    Include archived
+  </label>
+
+  <!-- Both states share this line: the empty prompt when no query is typed,
+       the named zero-match copy once one is (plan §3). -->
+  <p id="search-empty" aria-live="polite">Type to search your garden — title, body, and tags.</p>
+
+  <!-- tabindex="0" makes the panel itself reachable by Tab (US4); the ONE
+       keydown listener below lives on this container and nowhere else (D7). -->
+  <div id="search-results" role="listbox" aria-label="Search results" tabindex="0"></div>
+
+  <script type="application/json" id="search-docs" is:inline set:html={docsJson}></script>
+</Base>
+
+<script>
+  // T008 (R5) — query flow: parse the embed, build the index once, render on
+  // a ~100 ms debounce. Rows are built with createElement/textContent; the
+  // ONLY innerHTML is buildSnippet's pre-escaped html (escape-then-mark).
+  // T010 (D4/R5) — session refresh: re-read this page's own embed when the
+  // tab becomes visible again (same-origin GET of THIS route — no new
+  // endpoint, vault read-only) and patch the live index in memory.
+  // T011 (D7/R6) — one container-scoped keydown listener, no document-global
+  // arrow/Enter binding anywhere in the feature path.
+  import {
+    buildSearchIndex,
+    buildSnippet,
+    escapeHtml,
+    moveSelection,
+    removeDoc,
+    resultsKeyCommand,
+    searchIndex,
+    upsertDoc,
+  } from '../lib/search';
+  import { shouldOpenSearch } from '../lib/search-shortcut';
+  import type { SearchDoc } from '../lib/notes';
+
+  const EMPTY_PROMPT = 'Type to search your garden — title, body, and tags.';
+
+  const input = document.getElementById('search-input') as HTMLInputElement;
+  const archive = document.getElementById('search-archive') as HTMLInputElement;
+  const results = document.getElementById('search-results') as HTMLDivElement;
+  const emptyEl = document.getElementById('search-empty') as HTMLParagraphElement;
+  const docsEl = document.getElementById('search-docs');
+
+  /** The embedded SearchDoc[] — the session's working copy (D4). */
+  let docs = JSON.parse(docsEl?.textContent ?? '[]') as SearchDoc[];
+  let index = buildSearchIndex(docs);
+  /** slug → doc, the snippet/body lookup (rows never read MiniSearch's heap). */
+  let docMap = new Map<string, SearchDoc>(docs.map((d) => [d.slug, d]));
+
+  /* ---- Q2 self-guard: ⌘/Ctrl-K here must NOT navigate to this same page ---- */
+  wireSearchGuard();
+
+  function wireSearchGuard(): void {
+    document.addEventListener('keydown', (event) => {
+      if (
+        !shouldOpenSearch({
+          key: event.key,
+          ctrl: event.ctrlKey,
+          meta: event.metaKey,
+          alt: event.altKey,
+          shift: event.shiftKey,
+        })
+      )
+        return;
+      // Stay put (no self-navigation) and keep the D2 invariant: input focused.
+      event.preventDefault();
+      input.focus();
+    });
+  }
+
+  /* ---- rendering ---- */
+
+  function optionRows(): HTMLElement[] {
+    return Array.from(results.querySelectorAll<HTMLElement>('[role="option"]'));
+  }
+
+  let selection = -1;
+
+  function clearSelection(): void {
+    selection = -1;
+    results.removeAttribute('aria-activedescendant');
+  }
+
+  function applySelection(next: number): void {
+    const rows = optionRows();
+    if (rows.length === 0 || next < 0 || next >= rows.length) {
+      clearSelection();
+      return;
+    }
+    selection = next;
+    rows.forEach((row, i) => {
+      const on = i === selection;
+      row.setAttribute('aria-selected', on ? 'true' : 'false');
+      row.classList.toggle('is-selected', on);
+      if (on) {
+        results.setAttribute('aria-activedescendant', row.id);
+        row.scrollIntoView({ block: 'nearest' });
+      }
+    });
+  }
+
+  /** Build one result row (T008 row shape). */
+  function buildRow(hit: { slug: string; title: string; tags: string[]; status: string }, terms: string[], ordinal: number): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'result';
+    row.setAttribute('role', 'option');
+    row.id = `search-option-${ordinal}`;
+    row.setAttribute('aria-selected', 'false');
+    row.dataset.slug = hit.slug;
+
+    const link = document.createElement('a');
+    link.href = `/note/${hit.slug}`;
+    link.textContent = hit.title;
+    row.appendChild(link);
+
+    const slugLine = document.createElement('span');
+    slugLine.className = 'row-slug';
+    slugLine.textContent = hit.slug;
+    row.appendChild(slugLine);
+
+    // Body snippet from the embedded doc (index deliberately does not store
+    // `body`); buildSnippet output is already escaped + marked (D6).
+    const body = docMap.get(hit.slug)?.body ?? '';
+    const snippet = buildSnippet(body, terms);
+    if (snippet.html) {
+      const p = document.createElement('p');
+      p.className = 'snippet';
+      p.innerHTML = snippet.html; // pre-escaped by construction — only exception
+      row.appendChild(p);
+    }
+
+    if (hit.tags.length > 0) {
+      const tagList = document.createElement('ul');
+      tagList.className = 'tag-list';
+      for (const tag of hit.tags) {
+        const li = document.createElement('li');
+        li.className = 'tag';
+        li.textContent = tag;
+        tagList.appendChild(li);
+      }
+      row.appendChild(tagList);
+    }
+
+    // D5: archived rows only ever appear when the filter is on, and then
+    // they say so — same .badge[data-status] classes as the dashboard.
+    if (hit.status === 'archived') {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.setAttribute('data-status', 'archived');
+      badge.textContent = 'archived';
+      row.appendChild(badge);
+    }
+
+    return row;
+  }
+
+  function render(): void {
+    const query = input.value;
+    clearSelection();
+    results.replaceChildren();
+
+    if (!query.trim()) {
+      emptyEl.textContent = EMPTY_PROMPT;
+      emptyEl.hidden = false;
+      return;
+    }
+
+    const hits = searchIndex(index, query, { archiveShown: archive.checked });
+    if (hits.length === 0) {
+      // textContent keeps the user's own query escaped (plan §3 copy).
+      emptyEl.textContent = `No notes match "${query}" — try different words.`;
+      emptyEl.hidden = false;
+      return;
+    }
+
+    emptyEl.hidden = true;
+    const terms = query.trim().split(/\s+/);
+    const fragment = document.createDocumentFragment();
+    hits.forEach((hit, i) => fragment.appendChild(buildRow(hit, terms, i)));
+    results.appendChild(fragment);
+  }
+
+  /* ---- T008: debounce + archive filter + ?q= prefill ---- */
+
+  let debounceTimer: number | undefined;
+  let refreshInFlight: Promise<void> | null = null;
+
+  async function renderAfterRefresh(): Promise<void> {
+    // If a session refresh is mid-flight (tab just became visible), let it
+    // land first so a query typed right after switching tabs cannot render
+    // against stale docs.
+    if (refreshInFlight) await refreshInFlight;
+    render();
+  }
+
+  input.addEventListener('input', () => {
+    window.clearTimeout(debounceTimer);
+    debounceTimer = window.setTimeout(() => void renderAfterRefresh(), 100);
+  });
+
+  archive.addEventListener('change', render);
+
+  const initialQuery = new URLSearchParams(window.location.search).get('q');
+  // `?q=` only pre-fills the input — same single client search path, never a
+  // second read path (T008).
+  if (initialQuery) input.value = initialQuery;
+  void renderAfterRefresh();
+  // autofocus attribute + explicit focus (belt and braces, D2: focused on open)
+  input.focus();
+
+  /* ---- T010: D4 session refresh — in-memory re-add/replace, no new endpoint ---- */
+
+  function applyDocs(next: SearchDoc[]): void {
+    const nextBySlug = new Map(next.map((d) => [d.slug, d]));
+    let changed = false;
+
+    for (const slug of [...docMap.keys()]) {
+      if (nextBySlug.has(slug)) continue;
+      docs = removeDoc(docs, slug);
+      if (index.has(slug)) index.discard(slug);
+      docMap.delete(slug);
+      changed = true;
+    }
+
+    for (const doc of next) {
+      const previous = docMap.get(doc.slug);
+      if (previous && JSON.stringify(previous) === JSON.stringify(doc)) continue;
+      docs = upsertDoc(docs, doc);
+      if (index.has(doc.slug)) index.replace(doc);
+      else index.add(doc);
+      docMap.set(doc.slug, doc);
+      changed = true;
+    }
+
+    if (changed) render();
+  }
+
+  /**
+   * Re-read THIS page's own document (same-origin GET of `/search`, vault
+   * read-only server side — no new endpoint, no second save hook: D4 keeps
+   * `refreshVaultIndex` THE hook) and patch the live index with what it
+   * says. Any failure keeps the current session state untouched.
+   */
+  function refreshSession(): Promise<void> {
+    if (refreshInFlight) return refreshInFlight;
+
+    refreshInFlight = (async () => {
+      try {
+        const res = await fetch(`${window.location.pathname}${window.location.search}`, {
+          headers: { accept: 'text/html' },
+        });
+        if (!res.ok) return;
+        const html = await res.text();
+        const parsed = new DOMParser().parseFromString(html, 'text/html');
+        const island = parsed.getElementById('search-docs');
+        if (!island?.textContent) return;
+        applyDocs(JSON.parse(island.textContent) as SearchDoc[]);
+      } catch {
+        // Transient (offline tab, aborted nav): the next trigger retries;
+        // a stale session never throws into the UI.
+      } finally {
+        refreshInFlight = null;
+      }
+    })();
+
+    return refreshInFlight;
+  }
+
+  // The triggers the task pins: same-origin, vault-read-only, no endpoint.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void refreshSession();
+  });
+  window.addEventListener('pageshow', (event) => {
+    // bfcache restore is exactly the "came back to an old snapshot" case.
+    if (event.persisted) void refreshSession();
+  });
+
+  /* ---- T011: container-scoped results keys (D7) ---- */
+
+  results.addEventListener('keydown', (event) => {
+    // The listener lives ON the panel, so focus is inside it by construction.
+    const command = resultsKeyCommand({ key: event.key, panelFocused: true });
+    if (!command) return;
+
+    event.preventDefault();
+    const rows = optionRows();
+
+    if (command === 'enter') {
+      const slug = rows[selection]?.dataset.slug;
+      if (slug) location.assign(`/note/${slug}`);
+      return;
+    }
+
+    applySelection(moveSelection(command === 'up' ? -1 : 1, rows.length, selection));
+  });
+</script>
+
+<style>
+  h1 {
+    font-family: var(--font-ui);
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0 0 calc(var(--space) * 0.75);
+  }
+
+  #search-input {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-ui);
+    font-size: 1.05rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--ink);
+    border-radius: 4px;
+    background: var(--paper);
+    color: var(--ink);
+  }
+
+  #search-input:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  .archive-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+    margin-top: calc(var(--space) * 0.6);
+    cursor: pointer;
+  }
+
+  #search-empty {
+    font-family: var(--font-ui);
+    opacity: 0.75;
+    margin-top: calc(var(--space) * 0.8);
+  }
+
+  #search-results {
+    margin-top: calc(var(--space) * 0.5);
+    border-radius: 4px;
+  }
+
+  /* Visible focus for the panel itself (US4 keyboard reachability) — the
+     container is focusable so arrow keys have a scope to live in. */
+  #search-results:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  .result {
+    padding: 0.6rem 0.7rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+    font-family: var(--font-ui);
+  }
+
+  .result > a {
+    font-weight: 600;
+    color: inherit;
+  }
+
+  .result.is-selected {
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--ink) 35%, transparent);
+  }
+
+  .row-slug {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    opacity: 0.7;
+    margin-top: 0.1rem;
+  }
+
+  .snippet {
+    font-family: var(--font-body);
+    font-size: 0.95rem;
+    margin: 0.35rem 0 0;
+    line-height: 1.45;
+  }
+
+  .snippet mark {
+    background: color-mix(in srgb, #8a6d1f 30%, transparent);
+    color: inherit;
+    padding: 0 0.1em;
+  }
+
+  .tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    list-style: none;
+    padding: 0;
+    margin: 0.4rem 0 0;
+  }
+
+  .tag {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--ink) 35%, transparent);
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+    opacity: 0.85;
+  }
+
+  /* Badge look copied from the dashboard/status pages (page-scoped styles —
+     global.css is read-only for F5, so the classes are redeclared here). */
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    margin-left: 0.4rem;
+    vertical-align: middle;
+  }
+
+  .badge[data-status='seed'] {
+    color: #8a6d1f;
+  }
+
+  .badge[data-status='growing'] {
+    color: #2f6b3a;
+  }
+
+  .badge[data-status='evergreen'] {
+    color: #1f5d8a;
+  }
+
+  .badge[data-status='archived'] {
+    opacity: 0.65;
+  }
+</style>
