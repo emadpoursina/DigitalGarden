@@ -1,5 +1,6 @@
 /**
  * F3 T004 — note-body rendering (plan Research R1, spec FR-002).
+ * F8 T002 — syntax highlighting for fenced code blocks (spec FR-003, plan R1).
  *
  * `renderNoteBody` runs the Markdown through markdown-it with its safe
  * defaults (`html:false` — raw HTML in a note body is escaped, never
@@ -21,8 +22,47 @@
  *     `[[..]]` inside code can never become a link;
  *   - the resolver is INJECTED, so renderer, backlink index and autocomplete
  *     all call the same `resolveWikiLink` and can never disagree.
+ *
+ * Syntax highlighting (FR-003, F8 T002):
+ *
+ *   - Uses highlight.js core + a small subset of common languages.
+ *   - One module shared by SSR read-mode and the client preview (FR-004, C2).
+ *   - Untagged fences, unknown language tags, and empty fences fall back to
+ *     escaped code — never throw (FR-003 fallback requirement).
+ *   - highlight.js already HTML-escapes its output, so the markup is XSS-safe
+ *     by construction; `html:false` continues to hold for note body HTML.
  */
 import MarkdownIt from 'markdown-it';
+import hljs from 'highlight.js/lib/core';
+
+// Minimal language subset — common languages only, never the full bundle.
+import javascript from 'highlight.js/lib/languages/javascript';
+import typescript from 'highlight.js/lib/languages/typescript';
+import python from 'highlight.js/lib/languages/python';
+import bash from 'highlight.js/lib/languages/bash';
+import json from 'highlight.js/lib/languages/json';
+import css from 'highlight.js/lib/languages/css';
+import sql from 'highlight.js/lib/languages/sql';
+import rust from 'highlight.js/lib/languages/rust';
+import go from 'highlight.js/lib/languages/go';
+import yaml from 'highlight.js/lib/languages/yaml';
+
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('js', javascript);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('ts', typescript);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('py', python);
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('sh', bash);
+hljs.registerLanguage('shell', bash);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('sql', sql);
+hljs.registerLanguage('rust', rust);
+hljs.registerLanguage('go', go);
+hljs.registerLanguage('yaml', yaml);
+hljs.registerLanguage('yml', yaml);
 
 /** Canonical resolver signature — `resolveWikiLink(target, index.notes)`. */
 export type WikiLinkResolve = (target: string) => string | null;
@@ -36,11 +76,33 @@ interface WikilinkTokenMeta {
   target: string;
 }
 
+/**
+ * markdown-it `highlight` callback (FR-003).
+ *
+ * Returns a complete `<pre><code>` block when the language is registered;
+ * returns `''` (empty string) to let markdown-it render its safe default
+ * for untagged fences, empty fences, and unknown language tags.
+ * highlight.js output is already HTML-escaped, so the result is XSS-safe.
+ */
+function highlightCode(str: string, lang: string): string {
+  if (lang && hljs.getLanguage(lang)) {
+    try {
+      const highlighted = hljs.highlight(str, { language: lang, ignoreIllegals: true });
+      return `<pre class="hljs"><code class="language-${lang}">${highlighted.value}</code></pre>`;
+    } catch {
+      // Fall through to default rendering on any unexpected error.
+    }
+  }
+  // Return '' → markdown-it renders its own escaped <pre><code> block.
+  return '';
+}
+
 const md = new MarkdownIt({
   html: false, // raw HTML in note bodies renders as escaped text (FR-002)
   linkify: false,
   typographer: false,
   breaks: false,
+  highlight: highlightCode,
 });
 
 const LBRACKET = 0x5b; // [

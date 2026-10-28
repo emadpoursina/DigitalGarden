@@ -1,5 +1,6 @@
 /* Design tokens — tiny set per PRD §10 (clean/minimal, content over chrome).
-   Light + dark via prefers-color-scheme; full WCAG AA pass lands with F8. */
+   Light + dark via prefers-color-scheme; WCAG AA pass measured per surface
+   (F8: body/muted + link tokens, AC5 — dark links were UA blue at 1.96:1). */
 :root {
   --font-body: Georgia, 'Times New Roman', serif;
   --font-ui: system-ui, -apple-system, sans-serif;
@@ -7,13 +8,29 @@
   --space: 1rem;
   --ink: #1a1a1a;
   --paper: #fffdf8;
+  --link: #0000ee;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --ink: #e8e4da;
     --paper: #16140f;
+    --link: #8ab4f8;
   }
+}
+
+/* Explicit user-chosen theme — attribute selector (0,1,1) beats :root-in-media (0,1,0),
+   so a stored choice always wins over the OS preference. No attribute = media default. */
+html[data-theme="light"] {
+  --ink: #1a1a1a;
+  --paper: #fffdf8;
+  --link: #0000ee;
+}
+
+html[data-theme="dark"] {
+  --ink: #e8e4da;
+  --paper: #16140f;
+  --link: #8ab4f8;
 }
 
 body {
@@ -21,6 +38,13 @@ body {
   color: var(--ink);
   background: var(--paper);
   line-height: 1.6;
+}
+
+/* Author-origin link colour: overrides the UA default (including visited
+   purple) on every surface. Ratios: light #0000ee on #fffdf8 = 9.24:1,
+   dark #8ab4f8 on #16140f = 8.73:1 — both >= 4.5:1 (WCAG AA). */
+a {
+  color: var(--link);
 }
 
 main {

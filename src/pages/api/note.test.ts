@@ -9,6 +9,7 @@
  * temp vaults.
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -135,12 +136,20 @@ describe('POST /api/note', () => {
     expect(res.headers.get('content-type')).toContain('application/json');
     const body = (await res.json()) as {
       slug: string;
+      status: string;
       updated: string;
+      hash: string;
       backlinks: Record<string, Array<{ fromSlug: string; linkText: string }>>;
     };
     expect(body.slug).toBe('alpha');
+    expect(body.status).toBe('seed');
     expect(typeof body.updated).toBe('string');
     expect(body.updated.length).toBeGreaterThan(0);
+    expect(typeof body.hash).toBe('string');
+    const diskHash = createHash('sha256')
+      .update(readFileSync(join(vault, 'alpha.md')))
+      .digest('hex');
+    expect(body.hash).toBe(diskHash);
     // No further index refresh happened — the response already carries the
     // link created by THIS save, and the unresolved target contributes none.
     expect(body.backlinks).toEqual({
@@ -148,6 +157,66 @@ describe('POST /api/note', () => {
     });
     // …and the bytes on disk really are the saved body.
     expect(readNote(vault, 'alpha').body).toBe('See [[beta]] and [[No Such Note]].');
+  });
+
+  it('F8 C1: 200 body echoes new on-disk snapshot hash { slug, status, updated, hash, backlinks }, and subsequent save with stale baseHash fires 409', async () => {
+    createNote(vault, { title: 'Contract Note', slug: 'contract-note', body: 'initial text' });
+    const initialHash = hashOf('contract-note');
+
+    const res1 = await post({
+      slug: 'contract-note',
+      body: 'updated text',
+      baseHash: initialHash,
+    });
+
+    expect(res1.status).toBe(200);
+    const body1 = (await res1.json()) as {
+      slug: string;
+      status: string;
+      updated: string;
+      hash: string;
+      backlinks: unknown;
+    };
+
+    // Exactly five fields in the 200 body
+    expect(Object.keys(body1)).toEqual(['slug', 'status', 'updated', 'hash', 'backlinks']);
+    expect(body1.slug).toBe('contract-note');
+    expect(body1.status).toBe('seed');
+    expect(typeof body1.updated).toBe('string');
+
+    // (a) successful save's 200 body contains hash and equals sha256 of the file now on disk
+    const diskBytes = readFileSync(join(vault, 'contract-note.md'));
+    const diskHash = createHash('sha256').update(diskBytes).digest('hex');
+    expect(body1.hash).toBe(diskHash);
+    expect(body1.hash).not.toBe(initialHash);
+
+    // (b) subsequent save carrying stale baseHash fires 409 with existing shape
+    const res2 = await post({
+      slug: 'contract-note',
+      body: 'attempt with stale initialHash',
+      baseHash: initialHash,
+    });
+    expect(res2.status).toBe(409);
+    expect(await res2.json()).toEqual({
+      error: 'external-edit-conflict',
+      disk: {
+        updated: body1.updated,
+        hash: diskHash,
+      },
+    });
+
+    // Subsequent save using the echoed hash succeeds
+    const res3 = await post({
+      slug: 'contract-note',
+      body: 'saved with echoed hash',
+      baseHash: body1.hash,
+    });
+    expect(res3.status).toBe(200);
+    const body3 = (await res3.json()) as { hash: string };
+    const latestDiskHash = createHash('sha256')
+      .update(readFileSync(join(vault, 'contract-note.md')))
+      .digest('hex');
+    expect(body3.hash).toBe(latestDiskHash);
   });
 
   it('200: an empty body is a valid save (a note may be a stub)', async () => {
@@ -327,10 +396,21 @@ describe('POST /api/note — F4 status contract', () => {
     });
 
     expect(res.status).toBe(200);
-    const sent = (await res.json()) as { slug: string; status: string; updated: string; backlinks: unknown };
+    const sent = (await res.json()) as {
+      slug: string;
+      status: string;
+      updated: string;
+      hash: string;
+      backlinks: unknown;
+    };
     expect(sent.slug).toBe('lifecycle');
     expect(sent.status).toBe('growing'); // 200 carries the SAVED value (contract §1)
     expect(typeof sent.updated).toBe('string');
+    expect(typeof sent.hash).toBe('string');
+    const diskHash = createHash('sha256')
+      .update(readFileSync(join(vault, 'lifecycle.md')))
+      .digest('hex');
+    expect(sent.hash).toBe(diskHash);
 
     const after = readNote(vault, 'lifecycle');
     expect(after.status).toBe('growing');

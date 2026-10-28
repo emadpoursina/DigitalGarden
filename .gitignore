@@ -9,3 +9,5 @@ scratch/
 
 # agent handoffs are never committed
 .agent/
+specs/*/evidence/
+specs/*/evidence.md

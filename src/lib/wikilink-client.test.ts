@@ -9,13 +9,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   acceptSelection,
+  applySaveSuccess,
+  AUTOSAVE_IDLE_MS,
   autocompleteKeyCommand,
+  autosavePayload,
   conflictDecision,
   dismissAutocomplete,
   enterEdit,
   escapeDecision,
   extractQuery,
   filterCandidates,
+  handleBufferSaveResponse,
   handlePendingResponse,
   handleSaveResponse,
   isDirty,
@@ -29,11 +33,15 @@ import {
   saveDecision,
   saveErrorMessage,
   savePayload,
+  shouldAutosave,
   statusControlEnabled,
   statusDecision,
   statusSavePayload,
   submitPendingCreate,
   submitSave,
+  type BufferSaveOutcome,
+  type BufferSaveResponsePorts,
+  type EditBuffer,
   type NoteCandidate,
   type ResponseLike,
   type SaveResponsePorts,
@@ -583,5 +591,161 @@ describe('F4 statusControlEnabled (disable matrix, Q2)', () => {
     expect(statusControlEnabled({ editOpen: true, saveInFlight: false })).toBe(false);
     expect(statusControlEnabled({ editOpen: false, saveInFlight: true })).toBe(false);
     expect(statusControlEnabled({ editOpen: true, saveInFlight: true })).toBe(false);
+  });
+});
+
+/* ================================================================== *
+ * F8 T004 — autosave decisions (FR-006, plan R2, contract C1/C3).
+ * Previously import-only: these five symbols had ZERO exercising cases
+ * (critic C1 / tester flow-autosave). Pure vitest: no DOM, no network.
+ * ================================================================== */
+
+describe('F8 T004: shouldAutosave (idle decision truth table)', () => {
+  it('fires only when the buffer is dirty AND nothing is in flight', () => {
+    expect(shouldAutosave({ dirty: true, inFlight: false })).toBe(true);
+    expect(shouldAutosave({ dirty: true, inFlight: true })).toBe(false); // double-POST guard
+    expect(shouldAutosave({ dirty: false, inFlight: false })).toBe(false); // clean idle never POSTs
+    expect(shouldAutosave({ dirty: false, inFlight: true })).toBe(false);
+  });
+});
+
+describe('F8 T004: AUTOSAVE_IDLE_MS (spec Q2 — 2 s idle budget)', () => {
+  it('is exactly 2000 ms', () => {
+    expect(AUTOSAVE_IDLE_MS).toBe(2000);
+  });
+});
+
+describe('F8 T004: applySaveSuccess (contract C1 hash refresh)', () => {
+  const saved: EditBuffer = { value: 'saved text', baseHash: 'hash-1', dirty: false };
+
+  it('refreshes baseHash from the C1 hash echo, keeps the value, marks clean', () => {
+    const out = applySaveSuccess(saved, 'saved text', { hash: 'hash-2' });
+    expect(out).toEqual({ value: 'saved text', baseHash: 'hash-2', dirty: false });
+    expect(saved.baseHash).toBe('hash-1'); // input object untouched (pure)
+  });
+
+  it('keeps the previous baseHash when the body carries no hash', () => {
+    const out = applySaveSuccess(saved, 'saved text', {});
+    expect(out.baseHash).toBe('hash-1');
+    expect(out.dirty).toBe(false);
+  });
+
+  it('typing while the save was in flight leaves the buffer dirty', () => {
+    const typed: EditBuffer = { value: 'saved text + newer typing', baseHash: 'hash-1', dirty: true };
+    const out = applySaveSuccess(typed, 'saved text', { hash: 'hash-2' });
+    expect(out.baseHash).toBe('hash-2'); // disk hash still refreshes (no future 409)
+    expect(out.value).toBe('saved text + newer typing'); // buffer keeps the newer text
+    expect(out.dirty).toBe(true); // …so the next idle fires again
+  });
+
+  it('a fully undone buffer (value equals the sent text) comes back clean', () => {
+    const typed: EditBuffer = { value: 'saved text', baseHash: 'hash-1', dirty: true };
+    expect(applySaveSuccess(typed, 'saved text', { hash: 'hash-2' }).dirty).toBe(false);
+  });
+});
+
+describe('F8 T004: autosavePayload (FR-006 — structurally force:false)', () => {
+  it('builds the save payload with force:false on the wire', () => {
+    expect(autosavePayload('alpha', 'body text', 'hash-1')).toEqual({
+      slug: 'alpha',
+      body: 'body text',
+      baseHash: 'hash-1',
+      force: false,
+    });
+    expect(autosavePayload('alpha', 'body text', 'hash-1').force).toBe(false);
+  });
+
+  it('accepts exactly three arguments — force:true cannot be expressed', () => {
+    expect(autosavePayload).toHaveLength(3);
+  });
+});
+
+describe('F8 T004: handleBufferSaveResponse (buffer save — never reloads)', () => {
+  function bufferPorts() {
+    return {
+      showConflict: vi.fn(),
+      focusConflictControl: vi.fn(),
+      setStatus: vi.fn(),
+      setControlsEnabled: vi.fn(),
+      reload: vi.fn(), // optional port: must never be called on any branch
+    };
+  }
+
+  it('200 -> saved with the parsed body and no side effects at all', async () => {
+    const ports = bufferPorts();
+    const out = await handleBufferSaveResponse(
+      jsonResponse(200, { slug: 'alpha', hash: 'hash-2', updated: 'x' }),
+      ports,
+    );
+    expect(out).toEqual({ kind: 'saved', body: { slug: 'alpha', hash: 'hash-2', updated: 'x' } });
+    expect(ports.showConflict).not.toHaveBeenCalled();
+    expect(ports.setStatus).not.toHaveBeenCalled();
+    expect(ports.setControlsEnabled).not.toHaveBeenCalled();
+    expect(ports.reload).not.toHaveBeenCalled();
+  });
+
+  it('409 -> conflict region revealed, focus moved, controls re-enabled, no reload', async () => {
+    const ports = bufferPorts();
+    const out = await handleBufferSaveResponse(
+      jsonResponse(409, {
+        error: 'external-edit-conflict',
+        disk: { updated: '2026-10-28T00:00:00.000Z', hash: 'disk-1' },
+      }),
+      ports,
+    );
+    expect(out).toEqual({
+      kind: 'conflict',
+      disk: { updated: '2026-10-28T00:00:00.000Z', hash: 'disk-1' },
+    });
+    expect(ports.showConflict).toHaveBeenCalledWith({
+      updated: '2026-10-28T00:00:00.000Z',
+      hash: 'disk-1',
+    });
+    expect(ports.focusConflictControl).toHaveBeenCalledTimes(1);
+    expect(ports.setControlsEnabled).toHaveBeenCalledWith(true);
+    expect(ports.setStatus).not.toHaveBeenCalled();
+    expect(ports.reload).not.toHaveBeenCalled();
+  });
+
+  it('409 without disk details defaults the disk snapshot to empty strings', async () => {
+    const ports = bufferPorts();
+    const out = await handleBufferSaveResponse(
+      jsonResponse(409, { error: 'external-edit-conflict' }),
+      ports,
+    );
+    expect(out).toEqual({ kind: 'conflict', disk: { updated: '', hash: '' } });
+    expect(ports.reload).not.toHaveBeenCalled();
+  });
+
+  it('400 -> inline mapped message, controls re-enabled, stay (no reload)', async () => {
+    const ports = bufferPorts();
+    const out = await handleBufferSaveResponse(jsonResponse(400, { error: 'invalid-payload' }), ports);
+    expect(out).toEqual({ kind: 'failed', error: 'invalid-payload' });
+    expect(ports.setStatus).toHaveBeenCalledWith('The save could not be read.');
+    expect(ports.setControlsEnabled).toHaveBeenCalledWith(true);
+    expect(ports.showConflict).not.toHaveBeenCalled();
+    expect(ports.reload).not.toHaveBeenCalled();
+  });
+
+  it('500 -> the server message inline; controls re-enabled; no reload', async () => {
+    const ports = bufferPorts();
+    const out = await handleBufferSaveResponse(
+      jsonResponse(500, { error: 'save-failed', message: 'EACCES: permission denied' }),
+      ports,
+    );
+    expect(out).toEqual({ kind: 'failed', error: 'save-failed' });
+    expect(ports.setStatus).toHaveBeenCalledWith('EACCES: permission denied');
+    expect(ports.setControlsEnabled).toHaveBeenCalledWith(true);
+    expect(ports.reload).not.toHaveBeenCalled();
+  });
+
+  it('404 -> loud vanished-note message, never a silent reload', async () => {
+    const ports = bufferPorts();
+    const out = await handleBufferSaveResponse(jsonResponse(404, { error: 'note-not-found' }), ports);
+    expect(out).toEqual({ kind: 'failed', error: 'note-not-found' });
+    expect(ports.setStatus).toHaveBeenCalledWith('This note no longer exists on disk.');
+    expect(ports.setControlsEnabled).toHaveBeenCalledWith(true);
+    expect(ports.showConflict).not.toHaveBeenCalled();
+    expect(ports.reload).not.toHaveBeenCalled();
   });
 });
