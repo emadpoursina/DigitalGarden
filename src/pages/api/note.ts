@@ -1,6 +1,6 @@
 /**
- * F3 T007 → F4 T004 — `POST /api/note` save endpoint (plan Interface
- * Contracts §1, F4 extension D3).
+ * F3 T007 → F4 T004 → F8 T003 — `POST /api/note` save endpoint (plan Interface
+ * Contracts §1, F4 extension D3, F8 C1).
  *
  * Deliberately a THIN adapter, mirroring `api/capture.ts`: parse JSON → pure
  * `src/lib/notes.ts` calls → status table. No path logic, no resolution
@@ -13,7 +13,7 @@
  * value (disk truth for title/tags/body), so a status-only post cannot
  * clobber an edit made elsewhere and a body-only post cannot flip status.
  *
- *   200 { slug, status, updated, backlinks }   ← backlinks recomputed in THIS request
+ *   200 { slug, status, updated, hash, backlinks }   ← backlinks recomputed in THIS request
  *   409 { error:'external-edit-conflict', disk:{ updated, hash } }
  *   404 { error:'note-not-found', slug }
  *   400 { error:'invalid-payload' }    ← nothing written
@@ -93,7 +93,7 @@ export const POST: APIRoute = async ({ request }) => {
       ...(body !== undefined ? { body } : {}),
       ...(status !== undefined ? { status: status as NoteStatus } : {}),
     };
-    const { note } = saveNote(
+    const { note, snapshot } = saveNote(
       vault,
       next,
       {
@@ -112,6 +112,7 @@ export const POST: APIRoute = async ({ request }) => {
       slug: note.slug,
       status: note.status,
       updated: note.updated,
+      hash: snapshot.hash,
       backlinks: index.backlinks,
     });
   } catch (err) {

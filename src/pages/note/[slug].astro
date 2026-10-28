@@ -163,11 +163,25 @@ const pageDataJson = JSON.stringify({
              :global() rules because injected nodes carry no scope attribute. -->
         <article id="note-body" data-slug={note.slug} set:html={bodyHtml}></article>
 
-        <!-- T010: edit surface. The textarea ships prefilled with the raw
-             source so entering edit mode never re-reads the network. -->
+        <!-- T010: edit surface — F8: side-by-side source + live preview.
+             The textarea ships prefilled with the raw source so entering
+             edit mode never re-reads the network. The preview pane mirrors
+             the SSR read-mode renderer (same renderNoteBody call) so they
+             can never disagree. -->
         <section id="note-edit" hidden>
-          <label class="field-label" for="note-editor">Body (raw Markdown)</label>
-          <textarea id="note-editor" rows="16" spellcheck="false">{note.body}</textarea>
+          <div class="edit-split">
+            <div class="edit-source-pane">
+              <label class="field-label" for="note-editor">Body (raw Markdown)</label>
+              <textarea id="note-editor" rows="16" spellcheck="false">{note.body}</textarea>
+            </div>
+            <div class="edit-preview-pane" aria-label="Live preview">
+              <!-- [critic:C3] aria-live removed: refreshPreview() rewrites this
+                  pane per keystroke, which stormed screen readers. #note-status
+                  (role="alert") stays the live region for save status. -->
+              <span class="field-label" aria-hidden="true">Preview</span>
+              <div id="note-preview"></div>
+            </div>
+          </div>
           <div class="edit-actions">
             <button type="button" id="note-save">Save</button>
             <button type="button" id="note-cancel">Cancel</button>
@@ -374,6 +388,26 @@ const pageDataJson = JSON.stringify({
     margin-bottom: 0.3rem;
   }
 
+  /* ---- F8: side-by-side edit layout ---- */
+
+  .edit-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: calc(var(--space) * 1);
+    align-items: start;
+  }
+
+  @media (max-width: 52rem) {
+    .edit-split {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .edit-source-pane,
+  .edit-preview-pane {
+    min-width: 0; /* prevent grid blowout */
+  }
+
   #note-editor {
     font-family: var(--font-mono);
     font-size: 0.95rem;
@@ -391,6 +425,109 @@ const pageDataJson = JSON.stringify({
   #note-editor:focus {
     outline: 2px solid currentColor;
     outline-offset: 1px;
+  }
+
+  /* Preview pane: a live mirror of the SSR read-mode renderer.
+     Styled to match the :global(#note-body …) rules so preview and
+     read view are visually identical. */
+  #note-preview {
+    font-family: var(--font-body);
+    line-height: 1.65;
+    min-height: 4rem;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    padding: 0.6rem;
+    box-sizing: border-box;
+    overflow-wrap: break-word;
+  }
+
+  /* Mirror all note-body markdown rules onto the preview container. */
+  :global(#note-preview h1),
+  :global(#note-preview h2),
+  :global(#note-preview h3),
+  :global(#note-preview h4) {
+    font-family: var(--font-ui);
+    line-height: 1.3;
+    margin: 1.4rem 0 0.5rem;
+  }
+
+  :global(#note-preview h1) {
+    font-size: 1.5rem;
+  }
+
+  :global(#note-preview h2) {
+    font-size: 1.3rem;
+  }
+
+  :global(#note-preview h3) {
+    font-size: 1.15rem;
+  }
+
+  :global(#note-preview ul),
+  :global(#note-preview ol) {
+    padding-left: 1.4rem;
+  }
+
+  :global(#note-preview code) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+  }
+
+  :global(#note-preview pre) {
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+    padding: 0.75rem;
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+
+  :global(#note-preview pre code) {
+    background: none;
+    padding: 0;
+  }
+
+  :global(#note-preview blockquote) {
+    border-left: 3px solid currentColor;
+    margin-left: 0;
+    padding-left: 0.9rem;
+    opacity: 0.85;
+  }
+
+  :global(#note-preview table) {
+    border-collapse: collapse;
+    font-family: var(--font-ui);
+    font-size: 0.9rem;
+  }
+
+  :global(#note-preview th),
+  :global(#note-preview td) {
+    border: 1px solid currentColor;
+    padding: 0.3rem 0.55rem;
+    text-align: left;
+  }
+
+  :global(#note-preview .wikilink) {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  :global(#note-preview .wikilink.pending) {
+    text-decoration: none;
+    border-bottom: 2px dotted currentColor;
+    opacity: 0.75;
+    cursor: pointer;
+  }
+
+  :global(#note-preview .wikilink.pending:hover) {
+    opacity: 1;
+  }
+
+  :global(#note-preview .wikilink:focus-visible) {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
   }
 
   #note-edit[hidden] {
@@ -630,13 +767,28 @@ const pageDataJson = JSON.stringify({
     statusSavePayload,
     submitPendingCreate,
     submitSave,
+    // F8 T004: autosave decision helpers
+    AUTOSAVE_IDLE_MS,
+    shouldAutosave,
+    applySaveSuccess,
+    handleBufferSaveResponse,
+    autosavePayload,
     type EditState,
+    type EditBuffer,
+    type BufferSaveResponsePorts,
     type NoteCandidate,
     type NoteRequestInit,
     type PendingPorts,
     type SavePayload,
     type SaveResponsePorts,
   } from '../../lib/wikilink-client';
+  // F8 AC3: live preview uses the same renderer as SSR read mode — preview and
+  // read view can never disagree; html:false XSS safety carries over by construction.
+  import { renderNoteBody } from '../../lib/render';
+  // resolveWikiLink: the resolver reads only `slug` and `title` at runtime;
+  // node-builtin imports in notes.ts are tree-shaken by the browser bundler
+  // (already verified — importing resolveWikiLink alone builds cleanly).
+  import { resolveWikiLink } from '../../lib/notes';
   // F5 T007 (R3/Q2): Ctrl/⌘-K → /search from the reading/editing view.
   import { wireSearchShortcut } from '../../lib/search-shortcut';
 
@@ -649,6 +801,7 @@ const pageDataJson = JSON.stringify({
   const editRegion = document.getElementById('note-edit') as HTMLElement;
   const editOpenBtn = document.getElementById('note-edit-open') as HTMLButtonElement;
   const textarea = document.getElementById('note-editor') as HTMLTextAreaElement;
+  const previewEl = document.getElementById('note-preview') as HTMLElement;
   const saveBtn = document.getElementById('note-save') as HTMLButtonElement;
   const cancelBtn = document.getElementById('note-cancel') as HTMLButtonElement;
   const statusEl = document.getElementById('note-status') as HTMLParagraphElement;
@@ -665,10 +818,19 @@ const pageDataJson = JSON.stringify({
     snapshot?: { hash?: string; mtimeMs?: number };
     candidates?: NoteCandidate[];
   };
-  const baseHash = pageData.snapshot?.hash ?? '';
+  // F8: baseHash must be mutable so autosave can refresh it after a 200 via
+  // applySaveSuccess (C1 contract — echoed hash prevents 409-on-own-write).
+  let baseHash = pageData.snapshot?.hash ?? '';
   const candidates: NoteCandidate[] = Array.isArray(pageData.candidates)
     ? pageData.candidates
     : [];
+
+  // F8 AC3: resolver for the live preview — same function as SSR read mode.
+  // resolveWikiLink reads only `slug` and `title` at runtime; NoteCandidate
+  // carries both, so casting to the full NoteFields[] shape is structurally safe.
+  const previewResolver = (target: string) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    resolveWikiLink(target, candidates as any);
 
   /* ------------------------------------------------------------------ *
    * State
@@ -676,6 +838,30 @@ const pageDataJson = JSON.stringify({
   let editState: EditState = leaveEdit();
   let saveInFlight = false;
   let statusInFlight = false;
+  /**
+   * F8: edit buffer for autosave tracking.  `baseHash` here mirrors the
+   * page-level `baseHash` and is updated together with it on every 200.
+   */
+  let editBuffer: EditBuffer = { value: '', baseHash, dirty: false };
+  /**
+   * F8 converge [critic:C2]: the last value known to be on disk. The buffer's
+   * dirty flag is DERIVED (`textarea.value !== savedValue`) on every input
+   * instead of latching true, so type-then-undo back to the saved text leaves
+   * the buffer clean and the 2 s idle timer never POSTs a no-op write
+   * (spec Edge Cases: a clean buffer's idle autosave must not write).
+   */
+  let savedValue = textarea.value;
+  /**
+   * F8: autosave debounce timer handle.  Reset on every input; fires after
+   * AUTOSAVE_IDLE_MS of idle.  Cleared when leaving edit mode.
+   */
+  let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * F8: true after at least one successful body write (autosave or explicit)
+   * this page load — used to trigger location.reload() on edit-close so the
+   * SSR read view shows what is on disk.
+   */
+  let didWrite = false;
   /**
    * The LAST payload this page sent — body save or status save. The single
    * Overwrite control re-POSTs it with `force: true`, so one conflict box
@@ -756,17 +942,31 @@ const pageDataJson = JSON.stringify({
     });
   }
 
+  /** F8: render the current textarea value into the preview pane. */
+  function refreshPreview(): void {
+    previewEl.innerHTML = renderNoteBody(textarea.value, previewResolver);
+  }
+
   function openEdit(): void {
     editState = enterEdit(textarea.value); // textarea ships prefilled (SSR)
+    // F8: initialise autosave buffer from current textarea and baseHash.
+    editBuffer = { value: textarea.value, baseHash, dirty: false };
+    savedValue = textarea.value; // [critic:C2] the baseline starts clean on open
     noteBody.hidden = true;
     editRegion.hidden = false;
     statusEl.textContent = '';
     conflictEl.hidden = true;
     refreshSelectEnabled(); // …and the select locks for the whole edit (Q2)
+    refreshPreview(); // F8: render the initial preview on open
     textarea.focus();
   }
 
   function closeEdit(): void {
+    // F8: cancel any pending autosave timer.
+    if (autosaveTimer !== null) {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = null;
+    }
     editState = leaveEdit();
     editRegion.hidden = true;
     noteBody.hidden = false;
@@ -775,7 +975,39 @@ const pageDataJson = JSON.stringify({
     closePopup();
     refreshSelectEnabled();
     editOpenBtn.focus();
+    // F8: if at least one body write succeeded this session, reload so the
+    // SSR read view shows what is on disk.
+    if (didWrite) location.reload();
   }
+
+  /**
+   * F8: buffer-save ports — used by both autosave and explicit body saves.
+   * Unlike savePorts, this NEVER calls reload() on 200: edit mode stays open
+   * and the status line confirms.
+   */
+  const bufferSavePorts: BufferSaveResponsePorts & {
+    fetch(url: string, init: NoteRequestInit): Promise<Response>;
+  } = {
+    fetch: (url, init) => window.fetch(url, init),
+    setStatus: (message) => {
+      statusEl.textContent = message;
+    },
+    setControlsEnabled: (enabled) => {
+      saveBtn.disabled = !enabled;
+      cancelBtn.disabled = !enabled;
+      editOpenBtn.disabled = !enabled;
+      refreshSelectEnabled();
+    },
+    showConflict: (disk) => {
+      conflictEl.hidden = false;
+      conflictMsgEl.textContent = disk.updated
+        ? `This note changed on disk at ${disk.updated}. Reload it to take the disk copy, or overwrite it with yours.`
+        : 'This note changed on disk while you were editing.';
+    },
+    focusConflictControl: () => {
+      conflictReloadBtn.focus();
+    },
+  };
 
   /**
    * THE shared request path (plan R3 / contract §2): body saves and status
@@ -807,13 +1039,69 @@ const pageDataJson = JSON.stringify({
     }
   }
 
-  async function runBodySave(force: boolean): Promise<void> {
+  /**
+   * F8: shared body-save path for autosave and explicit Save.
+   * Uses handleBufferSaveResponse → never reloads on 200; stays in edit
+   * mode with status line confirming. On success, updates baseHash via
+   * applySaveSuccess (C1 contract) so future saves never 409 on own writes.
+   *
+   * @param force   must be false for autosave (autosavePayload guarantees
+   *                this); true only for the Overwrite retry.
+   * @param payload pre-built payload (used by Overwrite retry); when null
+   *                the payload is built from the current textarea value.
+   */
+  async function runBufferBodySave(force: boolean, payload?: SavePayload): Promise<void> {
+    // Double-save guard: skip if any save (body or status) is in flight.
     if (saveDecision({ inFlight: saveInFlight || statusInFlight, body: textarea.value }) === 'ignore') {
       return;
     }
-    await send(savePayload(slug, textarea.value, baseHash, force), (busy) => {
-      saveInFlight = busy;
-    });
+    const p = payload ?? (force
+      ? savePayload(slug, textarea.value, baseHash, true)
+      : autosavePayload(slug, textarea.value, baseHash));
+    const sentValue = p.body ?? textarea.value; // status-only payloads: textarea is right
+    pendingPayload = p;
+    saveInFlight = true;
+    bufferSavePorts.setControlsEnabled(false);
+    statusEl.textContent = 'Saving\u2026';
+    conflictEl.hidden = true;
+    try {
+      const res = await bufferSavePorts.fetch('/api/note', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(p),
+      });
+      const outcome = await handleBufferSaveResponse(res, bufferSavePorts);
+      if (outcome.kind === 'saved') {
+        // C1: refresh baseHash from the echoed hash so subsequent saves
+        // never 409 against their own previous write.
+        editBuffer = applySaveSuccess(editBuffer, sentValue, outcome.body);
+        baseHash = editBuffer.baseHash;
+        savedValue = sentValue; // [critic:C2] disk now holds the sent value
+        // Re-derive against the live textarea: a programmatic buffer change
+        // (e.g. wiki-link insertion, which fires no input event) keeps
+        // editBuffer.value truthful so dirty is never computed stale.
+        editBuffer = { ...editBuffer, value: textarea.value, dirty: textarea.value !== savedValue };
+        // Sync editState dirty flag with buffer truth.
+        if (editState.editing) {
+          editState = { ...editState, dirty: editBuffer.dirty };
+        }
+        didWrite = true;
+        // Friendly confirmation: "Saved HH:MM:SS" in local time.
+        const now = new Date();
+        const hh = String(now.getHours()).padStart(2, '0');
+        const mm = String(now.getMinutes()).padStart(2, '0');
+        const ss = String(now.getSeconds()).padStart(2, '0');
+        statusEl.textContent = `Saved ${hh}:${mm}:${ss}`;
+      }
+      // conflict / failed: handleBufferSaveResponse already wrote the status.
+      if (outcome.kind === 'conflict') statusEl.textContent = '';
+    } catch {
+      statusEl.textContent = 'The note could not be saved.';
+      bufferSavePorts.setControlsEnabled(true);
+    } finally {
+      saveInFlight = false;
+      refreshSelectEnabled();
+    }
   }
 
   async function runStatusSave(value: string, force = false): Promise<void> {
@@ -823,14 +1111,62 @@ const pageDataJson = JSON.stringify({
     });
   }
 
+  /** F8: reset the 2 s autosave debounce timer on every input. */
+  function scheduleAutosave(): void {
+    if (autosaveTimer !== null) clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => {
+      autosaveTimer = null;
+      // Fix 1: do not autosave while the conflict box is open — avoids
+      // focus-stealing loop (re-POSTing with stale baseHash → 409 → re-focus).
+      if (!conflictEl.hidden) return;
+      if (shouldAutosave({ dirty: editBuffer.dirty, inFlight: saveInFlight || statusInFlight })) {
+        void runBufferBodySave(false);
+      }
+    }, AUTOSAVE_IDLE_MS);
+  }
+
   editOpenBtn.addEventListener('click', openEdit);
 
   textarea.addEventListener('input', () => {
-    if (editState.editing) editState = markDirty(editState, textarea.value);
+    if (editState.editing) {
+      // [critic:C2] derive dirty from the value vs the last-saved text —
+      // type-then-undo back to the saved buffer flips back to clean instead
+      // of latching dirty, so the idle timer never POSTs a no-op write.
+      const dirty = textarea.value !== savedValue;
+      editState = { ...editState, value: textarea.value, dirty };
+      editBuffer = { ...editBuffer, value: textarea.value, dirty };
+    }
     refreshPopup();
+    // F8: live preview on every input.
+    refreshPreview();
+    // F8: reset the autosave debounce timer.
+    scheduleAutosave();
   });
 
-  saveBtn.addEventListener('click', () => void runBodySave(false));
+  // F8: explicit Save — immediate POST via buffer-save path (no reload on 200).
+  saveBtn.addEventListener('click', () => {
+    if (autosaveTimer !== null) {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = null;
+    }
+    void runBufferBodySave(false);
+  });
+
+  // F8: Ctrl/⌘-Enter inside the textarea → immediate save (textarea-scoped only).
+  textarea.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault();
+      if (autosaveTimer !== null) {
+        clearTimeout(autosaveTimer);
+        autosaveTimer = null;
+      }
+      void runBufferBodySave(false);
+      return;
+    }
+    // Autocomplete key routing (existing T012 handler below also runs; this
+    // early return lets the autocomplete handler own its keys when the popup
+    // is open — Ctrl/⌘-Enter is never a popup key so no conflict arises).
+  });
 
   // Q2: post ON CHANGE; an unchanged selection (or one made while a save is
   // in flight) posts nothing and leaves the select showing the disk truth.
@@ -871,10 +1207,17 @@ const pageDataJson = JSON.stringify({
     // ONE retry semantics for BOTH flows: re-POST exactly the payload that
     // conflicted, with `force: true` (the only source of force, FR-007).
     const wasStatusSave = payload.body === undefined && payload.status !== undefined;
-    void send({ ...payload, force: true }, (busy) => {
-      if (wasStatusSave) statusInFlight = busy;
-      else saveInFlight = busy;
-    });
+    if (wasStatusSave) {
+      // Status-save Overwrite: use the existing reload-on-200 path (status
+      // saves always reload — the server re-renders the status badge).
+      void send({ ...payload, force: true }, (busy) => {
+        statusInFlight = busy;
+      });
+    } else {
+      // Body-save Overwrite: use the buffer-save path (stay in edit mode,
+      // status line confirms, baseHash refreshed from C1 echo).
+      void runBufferBodySave(true, { ...payload, force: true });
+    }
   });
 
   document.addEventListener('keydown', (event) => {

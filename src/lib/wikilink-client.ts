@@ -212,6 +212,8 @@ export interface SaveResponseBody {
   /** Present since F4: the saved status echoed back by the endpoint. */
   status?: string;
   updated?: string;
+  /** Present since F8 C1: snapshot hash echoed back by the endpoint. */
+  hash?: string;
   backlinks?: Record<string, unknown>;
   error?: string;
   message?: string;
@@ -299,6 +301,116 @@ export async function submitSave(
     body: JSON.stringify(payload),
   });
   return handleSaveResponse(res, ports);
+}
+
+/* ================================================================== *
+ * F8 T004 — autosave decision helpers and edit buffer management
+ * (spec FR-006, plan Research R2, Data Model, Contracts C1/C3)
+ * ================================================================== */
+
+/** F8 T004 — Autosave debounce delay in milliseconds (plan R2, spec Q2, C3). */
+export const AUTOSAVE_IDLE_MS = 2000;
+
+/**
+ * F8 T004 — Pure autosave decision predicate (plan R2, FR-006):
+ * returns true only when the buffer is dirty AND no save is in flight.
+ */
+export function shouldAutosave(state: { dirty: boolean; inFlight: boolean }): boolean {
+  return state.dirty && !state.inFlight;
+}
+
+/** F8 T004 — Pure edit buffer snapshot for autosave tracking (plan Data Model). */
+export interface EditBuffer {
+  value: string;
+  baseHash: string;
+  dirty: boolean;
+}
+
+/**
+ * F8 T004 — Apply a successful save response to the edit buffer (plan R2, C1):
+ * - `baseHash` refreshed from the C1 `hash` echo (`body.hash ?? state.baseHash`)
+ * - `value` unchanged
+ * - `dirty = state.value !== sent` (typing while save was in flight stays dirty)
+ */
+export function applySaveSuccess(
+  state: EditBuffer,
+  sent: string,
+  body: { hash?: string },
+): EditBuffer {
+  return {
+    value: state.value,
+    baseHash: body.hash ?? state.baseHash,
+    dirty: state.value !== sent,
+  };
+}
+
+/** F8 T004 — Ports for handleBufferSaveResponse (narrow interface, no reload required). */
+export interface BufferSaveResponsePorts {
+  /** 409 → reveal `#note-conflict` without touching the textarea. */
+  showConflict(disk: { updated: string; hash: string }): void;
+  /** Move focus to the content-preserving control (`#conflict-reload`). */
+  focusConflictControl(): void;
+  /** Write the inline `#note-status` message (empty string clears it). */
+  setStatus(message: string): void;
+  /** Re-enable Save/Cancel controls on conflict or error. */
+  setControlsEnabled(enabled: boolean): void;
+  /** Optional reload port to assert that handleBufferSaveResponse never calls it. */
+  reload?(): void;
+}
+
+export type BufferSaveOutcome =
+  | { kind: 'saved'; body: SaveResponseBody }
+  | { kind: 'conflict'; disk: { updated: string; hash: string } }
+  | { kind: 'failed'; error: string };
+
+/**
+ * F8 T004 — Map a body-save `POST /api/note` response onto side effects WITHOUT
+ * reloading read mode (unlike handleSaveResponse):
+ *
+ * - `200` → parse the JSON body and return `{ kind: 'saved', body }` (never reloads,
+ *   never clears buffer, never touches textarea or status)
+ * - `409` → conflict region revealed + focus moved to content-preserving control,
+ *   re-enable controls, return `{ kind: 'conflict', disk }`
+ * - anything else → inline error message via setStatus, controls re-enabled,
+ *   return `{ kind: 'failed', error }`
+ */
+export async function handleBufferSaveResponse(
+  res: ResponseLike,
+  ports: BufferSaveResponsePorts,
+): Promise<BufferSaveOutcome> {
+  const body = (await readBody(res)) as SaveResponseBody | null;
+
+  if (res.status === 200) {
+    return { kind: 'saved', body: (body ?? {}) as SaveResponseBody };
+  }
+
+  if (res.status === 409) {
+    const disk = {
+      updated: body?.disk?.updated ?? '',
+      hash: body?.disk?.hash ?? '',
+    };
+    ports.showConflict(disk);
+    ports.focusConflictControl();
+    ports.setControlsEnabled(true);
+    return { kind: 'conflict', disk };
+  }
+
+  ports.setStatus(saveErrorMessage(body));
+  ports.setControlsEnabled(true);
+  return { kind: 'failed', error: body?.error ?? 'save-failed' };
+}
+
+/**
+ * F8 T004 — Payload for autosave (plan R2, FR-006):
+ * Structurally incapable of carrying `force: true` (built from `savePayload`
+ * with `force: false`).
+ */
+export function autosavePayload(
+  slug: string,
+  body: string,
+  baseHash: string,
+): SavePayload {
+  return savePayload(slug, body, baseHash, false);
 }
 
 /* ================================================================== *

@@ -4,7 +4,9 @@
 // F6 T030: one landmark nav above <slot/> gives every view the Tags entry
 // point (plan contract §4, D7) — a native link only: zero <script>, zero
 // <style> and zero key handlers in this file.
+// FR-010: theme toggle added to site-nav; early-apply script in <head>.
 import '../styles/global.css';
+import { THEME_STORAGE_KEY } from '../lib/theme';
 ---
 
 <!doctype html>
@@ -13,11 +15,101 @@ import '../styles/global.css';
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Digital Garden</title>
+    {/* Early-apply: runs before first paint to avoid flash of wrong theme.
+        First visit (nothing stored) → no attribute → media-query default stands. */}
+    <script is:inline define:vars={{ THEME_STORAGE_KEY }}>
+      (function () {
+        var stored = localStorage.getItem(THEME_STORAGE_KEY);
+        if (stored === 'light' || stored === 'dark') {
+          document.documentElement.dataset.theme = stored;
+        }
+      })();
+    </script>
   </head>
   <body>
     <main>
-      <nav id="site-nav" aria-label="Sections"><a href="/tags" id="tags-entry">Tags</a></nav>
+      <nav id="site-nav" aria-label="Sections">
+        <a href="/tags" id="tags-entry">Tags</a>
+        <button
+          type="button"
+          id="theme-toggle"
+          aria-pressed="false"
+          aria-label="Switch to dark theme"
+        >◑</button>
+      </nav>
       <slot />
     </main>
   </body>
 </html>
+
+<style>
+  #site-nav {
+    display: flex;
+    align-items: center;
+    gap: var(--space);
+  }
+
+  #theme-toggle {
+    background: none;
+    border: 1px solid currentColor;
+    border-radius: 0.25rem;
+    color: inherit;
+    cursor: pointer;
+    font-family: var(--font-ui);
+    font-size: 0.85rem;
+    line-height: 1;
+    opacity: 0.75;
+    padding: 0.2rem 0.45rem;
+  }
+
+  #theme-toggle:hover {
+    opacity: 1;
+  }
+</style>
+
+<script is:inline define:vars={{ THEME_STORAGE_KEY }}>
+  (function () {
+    var KEY = THEME_STORAGE_KEY;
+
+    /** Read the active theme from the <html> element (set by early-apply or toggle). */
+    function getActive() {
+      return document.documentElement.dataset.theme ||
+        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    }
+
+    function applyTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      var btn = document.getElementById('theme-toggle');
+      if (!btn) return;
+      /* aria-pressed = true means dark is currently active.
+         aria-label describes the NEXT action (what clicking will do). */
+      if (theme === 'dark') {
+        btn.setAttribute('aria-pressed', 'true');
+        btn.setAttribute('aria-label', 'Switch to light theme');
+      } else {
+        btn.setAttribute('aria-pressed', 'false');
+        btn.setAttribute('aria-label', 'Switch to dark theme');
+      }
+    }
+
+    /* Sync button state on load. */
+    applyTheme(getActive());
+
+    /* Toggle on click (Enter/Space work for free as it's a <button>). */
+    var btn = document.getElementById('theme-toggle');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        var next = getActive() === 'dark' ? 'light' : 'dark';
+        localStorage.setItem(KEY, next);
+        applyTheme(next);
+      });
+    }
+
+    /* OS preference listener — only applies while no stored choice exists. */
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', function (e) {
+      if (localStorage.getItem(KEY)) return; // stored choice wins
+      applyTheme(e.matches ? 'dark' : 'light');
+    });
+  })();
+</script>
